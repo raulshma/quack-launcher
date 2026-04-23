@@ -15,7 +15,10 @@ data class FilesUiState(
     val categories: List<CategorySummary> = emptyList(),
     val selectedCategory: FileCategory? = null,
     val isLoading: Boolean = false,
-    val isLoaded: Boolean = false
+    val isLoaded: Boolean = false,
+    val directoryStack: List<String> = emptyList(),
+    val directoryContents: List<DirectoryEntry> = emptyList(),
+    val isBrowsingDirectory: Boolean = false
 )
 
 class FilesViewModel(application: Application) : AndroidViewModel(application) {
@@ -45,5 +48,42 @@ class FilesViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectCategory(category: FileCategory?) {
         _uiState.update { it.copy(selectedCategory = category) }
+    }
+
+    fun openDirectory(path: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val entries = repository.listDirectory(path)
+            _uiState.update {
+                it.copy(
+                    directoryStack = it.directoryStack + path,
+                    directoryContents = entries,
+                    isBrowsingDirectory = true
+                )
+            }
+        }
+    }
+
+    fun navigateUp(): Boolean {
+        val stack = _uiState.value.directoryStack
+        if (stack.size <= 1) {
+            _uiState.update { it.copy(directoryStack = emptyList(), directoryContents = emptyList(), isBrowsingDirectory = false) }
+            return false
+        }
+        val parentPath = stack.dropLast(1).last()
+        viewModelScope.launch(Dispatchers.IO) {
+            val entries = repository.listDirectory(parentPath)
+            _uiState.update {
+                it.copy(
+                    directoryStack = stack.dropLast(1),
+                    directoryContents = entries,
+                    isBrowsingDirectory = true
+                )
+            }
+        }
+        return true
+    }
+
+    fun exitDirectoryBrowsing() {
+        _uiState.update { it.copy(directoryStack = emptyList(), directoryContents = emptyList(), isBrowsingDirectory = false) }
     }
 }

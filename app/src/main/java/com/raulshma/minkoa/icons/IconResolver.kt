@@ -23,10 +23,16 @@ data class ResolvedIcon(
     val imageBitmap: ImageBitmap
 )
 
+data class IconPackInfo(
+    val packageName: String,
+    val label: String
+)
+
 class IconResolver(private val context: Context) {
 
     private val packageManager = context.packageManager
     private val cache = mutableMapOf<String, ResolvedIcon>()
+    var activeIconPack: String? = null
 
     fun resolve(appKey: String): ResolvedIcon? {
         cache[appKey]?.let { return it }
@@ -38,8 +44,7 @@ class IconResolver(private val context: Context) {
 
         return try {
             val componentName = ComponentName(packageName, activityName)
-            val activityInfo = packageManager.getActivityInfo(componentName, 0)
-            val icon = activityInfo.loadIcon(packageManager)
+            val icon = loadIconForComponent(componentName, packageName)
                 ?: return null
 
             val bitmap = normalizeIcon(icon)
@@ -52,6 +57,62 @@ class IconResolver(private val context: Context) {
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun loadIconForComponent(componentName: ComponentName, packageName: String): Drawable? {
+        val iconPackPkg = activeIconPack
+        if (iconPackPkg != null) {
+            val packIcon = loadIconPackDrawable(iconPackPkg, componentName.flattenToString())
+                ?: loadIconPackDrawable(iconPackPkg, packageName)
+            if (packIcon != null) return packIcon
+        }
+        val activityInfo = packageManager.getActivityInfo(componentName, 0)
+        return activityInfo.loadIcon(packageManager)
+    }
+
+    private fun loadIconPackDrawable(iconPackPkg: String, componentNameStr: String): Drawable? {
+        return try {
+            val resources = packageManager.getResourcesForApplication(iconPackPkg)
+            val appFilterId = resources.getIdentifier("appfilter", "xml", iconPackPkg)
+            if (appFilterId == 0) return null
+
+            val xml = resources.getXml(appFilterId)
+            while (xml.next() != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                if (xml.name == "item") {
+                    val comp = xml.getAttributeValue(null, "component")
+                    if (comp != null && comp.contains(componentNameStr)) {
+                        val drawableName = xml.getAttributeValue(null, "drawable")
+                        if (drawableName != null) {
+                            val drawableId = resources.getIdentifier(drawableName, "drawable", iconPackPkg)
+                            if (drawableId != 0) {
+                                return packageManager.getDrawable(iconPackPkg, drawableId, null)
+                            }
+                        }
+                    }
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun queryInstalledIconPacks(): List<IconPackInfo> {
+        val intent = Intent("org.adw.launcher.THEMES")
+        return packageManager.queryIntentActivities(intent, 0)
+            .mapNotNull { resolveInfo ->
+                val pkg = resolveInfo.activityInfo?.packageName ?: return@mapNotNull null
+                val label = try {
+                    resolveInfo.loadLabel(packageManager)?.toString() ?: pkg
+                } catch (_: Exception) { pkg }
+                IconPackInfo(pkg, label)
+            }
+            .sortedBy { it.label.lowercase() }
+    }
+
+    fun setIconPack(packageName: String?) {
+        activeIconPack = packageName
+        cache.clear()
     }
 
     fun preloadIcons(appKeys: List<String>) {

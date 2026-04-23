@@ -3,7 +3,9 @@ package com.raulshma.minkoa.files
 import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
+import android.os.Environment
 import android.provider.MediaStore
+import java.io.File
 
 data class FileItem(
     val id: Long,
@@ -31,6 +33,35 @@ data class FileItem(
             mimeType.contains("7z") -> FileCategory.Archives
             else -> FileCategory.Other
         }
+}
+
+data class DirectoryEntry(
+    val name: String,
+    val path: String,
+    val isDirectory: Boolean,
+    val size: Long,
+    val lastModified: Long,
+    val childCount: Int = 0
+)
+
+data class StorageDirectory(
+    val name: String,
+    val path: String,
+    val icon: String
+) {
+    companion object {
+        fun getStandardDirectories(): List<StorageDirectory> {
+            val base = Environment.getExternalStorageDirectory()
+            return listOf(
+                StorageDirectory("Downloads", "${base}/Download", "download"),
+                StorageDirectory("Documents", "${base}/Documents", "documents"),
+                StorageDirectory("Pictures", "${base}/Pictures", "pictures"),
+                StorageDirectory("Music", "${base}/Music", "music"),
+                StorageDirectory("Videos", "${base}/Movies", "videos"),
+                StorageDirectory("Audio", "${base}/Audio", "audio")
+            )
+        }
+    }
 }
 
 enum class FileCategory(val label: String) {
@@ -118,6 +149,25 @@ class FilesRepository(private val context: Context) {
                 )
             }
             .sortedByDescending { it.count }
+    }
+
+    fun listDirectory(path: String): List<DirectoryEntry> {
+        val dir = File(path)
+        if (!dir.exists() || !dir.isDirectory) return emptyList()
+        return dir.listFiles()
+            ?.filterNot { it.name.startsWith(".") }
+            ?.map { file ->
+                DirectoryEntry(
+                    name = file.name,
+                    path = file.absolutePath,
+                    isDirectory = file.isDirectory,
+                    size = if (file.isFile) file.length() else 0L,
+                    lastModified = file.lastModified() / 1000,
+                    childCount = if (file.isDirectory) (file.listFiles()?.size ?: 0) else 0
+                )
+            }
+            ?.sortedWith(compareByDescending<DirectoryEntry> { it.isDirectory }.thenBy { it.name.lowercase() })
+            ?: emptyList()
     }
 }
 

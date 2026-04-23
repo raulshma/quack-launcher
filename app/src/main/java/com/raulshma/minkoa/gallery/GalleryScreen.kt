@@ -1,8 +1,13 @@
 package com.raulshma.minkoa.gallery
 
 import android.Manifest
+import android.app.WallpaperManager
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -39,11 +44,15 @@ import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Collections
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Wallpaper
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedFilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -150,6 +159,7 @@ fun GalleryScreen(
                 ImageViewer(
                     image = target,
                     onDismiss = { selectedImage = null },
+                    onDeleted = { viewModel.loadImages(); selectedImage = null },
                     sharedTransitionScope = this@SharedTransitionLayout,
                     animatedContentScope = this@AnimatedContent,
                     modifier = modifier
@@ -309,10 +319,12 @@ private fun GalleryGrid(
 private fun ImageViewer(
     image: GalleryImage,
     onDismiss: () -> Unit,
+    onDeleted: () -> Unit,
     sharedTransitionScope: SharedTransitionScope,
     animatedContentScope: AnimatedContentScope,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var offsetY by remember { mutableFloatStateOf(0f) }
     val animatedOffset by animateFloatAsState(
         targetValue = offsetY,
@@ -379,12 +391,65 @@ private fun ImageViewer(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { shareImage(context, image) }) {
+                    Icon(
+                        Icons.Rounded.Share,
+                        contentDescription = "Share",
+                        tint = Color.White.copy(alpha = 0.9f)
+                    )
+                }
+                IconButton(onClick = { setAsWallpaper(context, image) }) {
+                    Icon(
+                        Icons.Rounded.Wallpaper,
+                        contentDescription = "Set as wallpaper",
+                        tint = Color.White.copy(alpha = 0.9f)
+                    )
+                }
+                IconButton(onClick = { deleteImage(context, image); onDeleted() }) {
+                    Icon(
+                        Icons.Rounded.Delete,
+                        contentDescription = "Delete",
+                        tint = Color.White.copy(alpha = 0.9f)
+                    )
+                }
+            }
             Text(
                 text = "Swipe down to close",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color.White.copy(alpha = 0.6f)
             )
         }
+    }
+}
+
+private fun shareImage(context: Context, image: GalleryImage) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "image/*"
+        putExtra(Intent.EXTRA_STREAM, image.uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share image").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+}
+
+private fun setAsWallpaper(context: Context, image: GalleryImage) {
+    val intent = Intent(Intent.ACTION_ATTACH_DATA).apply {
+        setDataAndType(image.uri, "image/*")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        putExtra("mimeType", "image/*")
+    }
+    runCatching {
+        context.startActivity(Intent.createChooser(intent, "Set as wallpaper").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+}
+
+private fun deleteImage(context: Context, image: GalleryImage) {
+    runCatching {
+        context.contentResolver.delete(image.uri, null, null)
     }
 }
 

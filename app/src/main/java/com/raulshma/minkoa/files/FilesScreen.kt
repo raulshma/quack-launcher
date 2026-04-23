@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -43,6 +45,7 @@ import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -119,6 +122,9 @@ fun FilesScreen(
     FilesContent(
         uiState = uiState,
         onCategorySelected = { viewModel.selectCategory(it) },
+        onOpenDirectory = { viewModel.openDirectory(it) },
+        onNavigateUp = { viewModel.navigateUp() },
+        onExitDirectory = { viewModel.exitDirectoryBrowsing() },
         modifier = modifier
     )
 }
@@ -127,9 +133,26 @@ fun FilesScreen(
 private fun FilesContent(
     uiState: FilesUiState,
     onCategorySelected: (FileCategory?) -> Unit,
+    onOpenDirectory: (String) -> Unit,
+    onNavigateUp: () -> Unit,
+    onExitDirectory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+
+    if (uiState.isBrowsingDirectory) {
+        DirectoryBrowser(
+            path = uiState.directoryStack.lastOrNull() ?: "",
+            entries = uiState.directoryContents,
+            onEntryClick = { entry ->
+                if (entry.isDirectory) onOpenDirectory(entry.path)
+                else openFileFromPath(context, entry.path)
+            },
+            onNavigateUp = onNavigateUp,
+            onExit = onExitDirectory
+        )
+        return
+    }
 
     Column(
         modifier = modifier
@@ -298,6 +321,63 @@ private fun FilesContent(
                             file = file,
                             onClick = { openFile(context, file) }
                         )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Browse Storage",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                StorageDirectory.getStandardDirectories().forEach { dir ->
+                    val file = java.io.File(dir.path)
+                    if (file.exists() && file.isDirectory) {
+                        ElevatedCard(
+                            onClick = { onOpenDirectory(dir.path) },
+                            shape = RoundedCornerShape(20.dp),
+                            modifier = Modifier.width(110.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    modifier = Modifier.size(44.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = when (dir.icon) {
+                                                "download" -> Icons.Rounded.Download
+                                                "documents" -> Icons.Rounded.Description
+                                                "pictures" -> Icons.Rounded.Image
+                                                "music", "audio" -> Icons.Rounded.AudioFile
+                                                "videos" -> Icons.Rounded.VideoFile
+                                                else -> Icons.Rounded.Folder
+                                            },
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = dir.name,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -582,5 +662,161 @@ private fun checkFilesPermission(context: android.content.Context): Boolean {
             context,
             Manifest.permission.READ_EXTERNAL_STORAGE
         ) == PackageManager.PERMISSION_GRANTED
+    }
+}
+
+@Composable
+private fun DirectoryBrowser(
+    path: String,
+    entries: List<DirectoryEntry>,
+    onEntryClick: (DirectoryEntry) -> Unit,
+    onNavigateUp: () -> Unit,
+    onExit: () -> Unit
+) {
+    val context = LocalContext.current
+    val dirName = path.substringAfterLast("/")
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(onClick = { onExit() }) {
+                Text("Back")
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = dirName.ifBlank { "Storage" },
+                    style = MaterialTheme.typography.displayMedium
+                )
+                Text(
+                    text = path,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        if (entries.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Folder,
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Empty directory",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(entries.size) { index ->
+                    val entry = entries[index]
+                    Surface(
+                        onClick = { onEntryClick(entry) },
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 1.dp,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (entry.isDirectory) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = if (entry.isDirectory) Icons.Rounded.Folder else mimeTypeIcon(guessMimeType(entry.name)),
+                                        contentDescription = null,
+                                        tint = if (entry.isDirectory) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = entry.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = if (entry.isDirectory) "${entry.childCount} items"
+                                    else "${formatFileSize(entry.size)} \u00b7 ${formatTimestamp(entry.lastModified)}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun guessMimeType(fileName: String): String? {
+    val ext = fileName.substringAfterLast('.', "").lowercase()
+    return when (ext) {
+        "jpg", "jpeg", "png", "gif", "webp", "bmp" -> "image/*"
+        "mp4", "avi", "mkv", "mov" -> "video/*"
+        "mp3", "wav", "flac", "ogg", "aac" -> "audio/*"
+        "pdf" -> "application/pdf"
+        "zip" -> "application/zip"
+        "txt", "log" -> "text/plain"
+        "doc", "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        "xls", "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        else -> null
+    }
+}
+
+private fun openFileFromPath(context: android.content.Context, path: String) {
+    try {
+        val file = java.io.File(path)
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file
+        )
+        val mimeType = guessMimeType(path) ?: "application/octet-stream"
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    } catch (_: Exception) {
     }
 }

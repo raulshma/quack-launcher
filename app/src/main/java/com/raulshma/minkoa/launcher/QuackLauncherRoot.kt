@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ApplicationInfo
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.compose.animation.core.Spring
@@ -13,6 +14,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -44,11 +46,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.ViewAgenda
 import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material3.CircularProgressIndicator
@@ -64,6 +69,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -102,9 +109,12 @@ import com.raulshma.minkoa.data.SavedLayout
 import com.raulshma.minkoa.data.SlotContent
 import com.raulshma.minkoa.files.FilesScreen
 import com.raulshma.minkoa.gallery.GalleryScreen
+import com.raulshma.minkoa.gestures.GestureHelper
+import com.raulshma.minkoa.icons.IconPackInfo
 import com.raulshma.minkoa.icons.IconResolver
 import com.raulshma.minkoa.icons.ResolvedIcon
 import com.raulshma.minkoa.notifications.LauncherNotificationListener
+import com.raulshma.minkoa.preferences.AppPreferencesRepository
 import com.raulshma.minkoa.ui.theme.LocalMotionTokens
 import com.raulshma.minkoa.ui.theme.LocalShapeTokens
 import com.raulshma.minkoa.weather.WeatherScreen
@@ -128,6 +138,7 @@ private const val WORKSPACE_ROWS = 5
 private const val WORKSPACE_SLOTS = WORKSPACE_COLUMNS * WORKSPACE_ROWS
 private const val DOCK_APP_SLOTS = 5
 private const val SWIPE_UP_THRESHOLD = -120f
+private const val SWIPE_DOWN_THRESHOLD = 120f
 
 private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val dateFormatter = DateTimeFormatter.ofPattern("EEE, MMM d", Locale.getDefault())
@@ -167,14 +178,53 @@ private data class DragInProgress(
 data class LauncherApp(
     val label: String,
     val packageName: String,
-    val activityName: String
+    val activityName: String,
+    val category: AppCategory = AppCategory.Other
 )
+
+enum class AppCategory(val label: String) {
+    Social("Social"),
+    Productivity("Productivity"),
+    Games("Games"),
+    Entertainment("Entertainment"),
+    Communication("Communication"),
+    Media("Media"),
+    Tools("Tools"),
+    Shopping("Shopping"),
+    Finance("Finance"),
+    Health("Health"),
+    Travel("Travel"),
+    Education("Education"),
+    Other("Other");
+
+    companion object {
+        fun fromAppInfo(applicationInfo: ApplicationInfo?): AppCategory {
+            if (applicationInfo == null) return Other
+            return when (applicationInfo.category) {
+                ApplicationInfo.CATEGORY_SOCIAL -> Social
+                ApplicationInfo.CATEGORY_PRODUCTIVITY -> Productivity
+                ApplicationInfo.CATEGORY_GAME -> Games
+                7 -> Entertainment
+                3 -> Communication
+                ApplicationInfo.CATEGORY_AUDIO, ApplicationInfo.CATEGORY_VIDEO, ApplicationInfo.CATEGORY_IMAGE -> Media
+                ApplicationInfo.CATEGORY_MAPS, 9 -> Travel
+                5 -> Shopping
+                8 -> Finance
+                10 -> Health
+                6 -> Education
+                else -> Other
+            }
+        }
+    }
+}
 
 data class LauncherUiState(
     val installedApps: List<LauncherApp> = emptyList(),
     val searchQuery: String = "",
     val isLoading: Boolean = true,
-    val icons: Map<String, ResolvedIcon> = emptyMap()
+    val icons: Map<String, ResolvedIcon> = emptyMap(),
+    val hiddenApps: Set<String> = emptySet(),
+    val customLabels: Map<String, String> = emptyMap()
 )
 
 class LauncherViewModel(application: android.app.Application) :
@@ -183,6 +233,8 @@ class LauncherViewModel(application: android.app.Application) :
     private val _uiState = MutableStateFlow(LauncherUiState())
     val uiState: StateFlow<LauncherUiState> = _uiState.asStateFlow()
     private val iconResolver = IconResolver(application)
+    val activeIconPack: String? get() = iconResolver.activeIconPack
+    private val appPrefs = AppPreferencesRepository(application)
 
     init { refreshApps() }
 
@@ -195,10 +247,14 @@ class LauncherViewModel(application: android.app.Application) :
             val apps = queryLaunchableApps(getApplication())
             val keys = apps.map(::appKey)
             iconResolver.preloadIcons(keys)
+            val hiddenApps = appPrefs.getHiddenApps()
+            val customLabels = appPrefs.getCustomLabels()
             _uiState.update { state ->
                 state.copy(
                     installedApps = apps,
                     isLoading = false,
+                    hiddenApps = hiddenApps,
+                    customLabels = customLabels,
                     icons = buildMap {
                         keys.forEach { key ->
                             iconResolver.resolve(key)?.let { put(key, it) }
@@ -207,6 +263,34 @@ class LauncherViewModel(application: android.app.Application) :
                 )
             }
         }
+    }
+
+    fun hideApp(key: String) {
+        appPrefs.hideApp(key)
+        _uiState.update { it.copy(hiddenApps = appPrefs.getHiddenApps()) }
+    }
+
+    fun showApp(key: String) {
+        appPrefs.showApp(key)
+        _uiState.update { it.copy(hiddenApps = appPrefs.getHiddenApps()) }
+    }
+
+    fun renameApp(key: String, newLabel: String) {
+        if (newLabel.isBlank()) appPrefs.removeCustomLabel(key)
+        else appPrefs.setCustomLabel(key, newLabel.trim())
+        _uiState.update { it.copy(customLabels = appPrefs.getCustomLabels()) }
+    }
+
+    fun getDisplayLabel(app: LauncherApp): String {
+        val key = appKey(app)
+        return _uiState.value.customLabels[key] ?: app.label
+    }
+
+    fun getInstalledIconPacks(): List<IconPackInfo> = iconResolver.queryInstalledIconPacks()
+
+    fun setIconPack(packageName: String?) {
+        iconResolver.setIconPack(packageName)
+        refreshApps()
     }
 
     private fun queryLaunchableApps(application: android.app.Application): List<LauncherApp> {
@@ -223,7 +307,10 @@ class LauncherViewModel(application: android.app.Application) :
                 val label = resolveInfo.loadLabel(packageManager)?.toString()
                     ?.takeIf { it.isNotBlank() }
                     ?: activityInfo.name.substringAfterLast('.')
-                LauncherApp(label, activityInfo.packageName, activityInfo.name)
+                val category = try {
+                    AppCategory.fromAppInfo(packageManager.getApplicationInfo(activityInfo.packageName, 0))
+                } catch (_: Exception) { AppCategory.Other }
+                LauncherApp(label, activityInfo.packageName, activityInfo.name, category)
             }
             .distinctBy { appKey(it) }
             .sortedBy { it.label.lowercase(Locale.getDefault()) }
@@ -292,11 +379,15 @@ fun QuackLauncherRoot(
         label = "dock-fade"
     )
 
-    val filteredApps by remember(uiState.installedApps, uiState.searchQuery) {
+    val filteredApps by remember(uiState.installedApps, uiState.searchQuery, uiState.hiddenApps) {
         derivedStateOf {
             val q = uiState.searchQuery.trim()
-            if (q.isBlank()) uiState.installedApps
-            else uiState.installedApps.filter { it.label.contains(q, true) || it.packageName.contains(q, true) }
+            val visible = uiState.installedApps.filter { app ->
+                val key = appKey(app)
+                appKey(app) !in uiState.hiddenApps
+            }
+            if (q.isBlank()) visible
+            else visible.filter { it.label.contains(q, true) || it.packageName.contains(q, true) }
         }
     }
 
@@ -406,6 +497,7 @@ fun QuackLauncherRoot(
                     page == PAGER_ANCHOR_PAGE -> AnchorHomeScreen(
                         workspaceSlots, appsByKey, iconsByKey, notificationCounts, widgetHostController,
                         isEditMode, selectedSlot, dragHoverTarget, dragInProgress?.source,
+                        uiState.customLabels,
                         onOpenDrawer = { isAppDrawerOpen = true },
                         onEnterEditMode = { isEditMode = true; selectedSlot = null },
                         onWorkspaceSlotTapped = { handleSlotTap(SlotArea.Workspace, it) },
@@ -431,6 +523,7 @@ fun QuackLauncherRoot(
             GlobalDock(
                 dockSlots, appsByKey, iconsByKey, notificationCounts, widgetHostController,
                 isEditMode, selectedSlot, dragHoverTarget, dragInProgress?.source,
+                uiState.customLabels,
                 onDockSlotTapped = { handleSlotTap(SlotArea.Dock, it) },
                 onDockSlotBoundsChanged = { i, b -> dockBounds[i] = b },
                 onDockDragStart = { i, p -> contentAtSlot(SlotSelection(SlotArea.Dock, i))?.let { beginDrag(SlotSelection(SlotArea.Dock, i), it, p) } },
@@ -443,12 +536,14 @@ fun QuackLauncherRoot(
                 dragInProgress?.let { drag ->
                     DraggedAppPreview(label = drag.label, modifier = Modifier.offset { IntOffset((drag.pointerInRoot.x - 26f).roundToInt(), (drag.pointerInRoot.y - 26f).roundToInt()) })
                 }
+                val iconPacks = remember { viewModel.getInstalledIconPacks() }
                 EditModeOverlay(
-                    leftScreens.size, rightScreens.size,
+                    leftScreens.size, rightScreens.size, iconPacks, viewModel.activeIconPack,
                     onAddLeft = { pendingScreenSide = ScreenSide.Left.name; isScreenEditorOpen = true },
                     onAddRight = { pendingScreenSide = ScreenSide.Right.name; isScreenEditorOpen = true },
                     onWidgets = { isWidgetPickerOpen = true },
                     onDone = { isEditMode = false; selectedSlot = null },
+                    onIconPackSelected = { viewModel.setIconPack(it) },
                     modifier = Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(horizontal = 12.dp, vertical = 8.dp)
                 )
             }
@@ -457,18 +552,29 @@ fun QuackLauncherRoot(
 
     if (isAppDrawerOpen) {
         ModalBottomSheet(onDismissRequest = { isAppDrawerOpen = false }, sheetState = appDrawerState) {
-            AppDrawerSheet(uiState.isLoading, filteredApps, iconsByKey, notificationCounts, uiState.searchQuery, viewModel::onSearchQueryChanged) { app ->
-                val selected = selectedSlot
-                if (isEditMode) {
-                    if (selected != null) { assignSlot(selected, SlotContent.App(appKey(app))); selectedSlot = null }
-                    else {
-                        val firstEmpty = workspaceSlots.indexOfFirst { it == null }
-                        if (firstEmpty >= 0) { workspaceSlots = workspaceSlots.toMutableList().apply { this[firstEmpty] = SlotContent.App(appKey(app)) }; persistLayout() }
-                        else launchApp(context, app)
-                    }
-                } else launchApp(context, app)
-                isAppDrawerOpen = false
-            }
+            AppDrawerSheet(
+                isLoading = uiState.isLoading,
+                apps = filteredApps,
+                icons = iconsByKey,
+                notificationCounts = notificationCounts,
+                searchQuery = uiState.searchQuery,
+                customLabels = uiState.customLabels,
+                onSearchQueryChanged = viewModel::onSearchQueryChanged,
+                onAppClicked = { app ->
+                    val selected = selectedSlot
+                    if (isEditMode) {
+                        if (selected != null) { assignSlot(selected, SlotContent.App(appKey(app))); selectedSlot = null }
+                        else {
+                            val firstEmpty = workspaceSlots.indexOfFirst { it == null }
+                            if (firstEmpty >= 0) { workspaceSlots = workspaceSlots.toMutableList().apply { this[firstEmpty] = SlotContent.App(appKey(app)) }; persistLayout() }
+                            else launchApp(context, app)
+                        }
+                    } else launchApp(context, app)
+                    isAppDrawerOpen = false
+                },
+                onHideApp = { key -> viewModel.hideApp(key) },
+                onRenameApp = { key, label -> viewModel.renameApp(key, label) }
+            )
         }
     }
 
@@ -498,6 +604,7 @@ private fun AnchorHomeScreen(
     selectedSlot: SlotSelection?,
     dragHoverTarget: SlotSelection?,
     dragSource: SlotSelection?,
+    customLabels: Map<String, String>,
     onOpenDrawer: () -> Unit,
     onEnterEditMode: () -> Unit,
     onWorkspaceSlotTapped: (Int) -> Unit,
@@ -507,14 +614,29 @@ private fun AnchorHomeScreen(
     onWorkspaceDragEnd: () -> Unit,
     onWorkspaceDragCancel: () -> Unit
 ) {
+    val context = LocalContext.current
     var cumulativeDrag by remember { mutableStateOf(0f) }
     val now by produceState(initialValue = LocalDateTime.now()) { while (true) { value = LocalDateTime.now(); delay(30_000) } }
 
     Column(
         modifier = Modifier.fillMaxSize().pointerInput(Unit) {
+            detectTapGestures(
+                onDoubleTap = {
+                    if (!GestureHelper.lockScreen(context)) {
+                        GestureHelper.requestDeviceAdmin(context)
+                    }
+                }
+            )
+        }.pointerInput(Unit) {
             detectVerticalDragGestures(
                 onVerticalDrag = { _, dragAmount -> cumulativeDrag += dragAmount },
-                onDragEnd = { if (cumulativeDrag < SWIPE_UP_THRESHOLD) onOpenDrawer(); cumulativeDrag = 0f },
+                onDragEnd = {
+                    when {
+                        cumulativeDrag < SWIPE_UP_THRESHOLD -> onOpenDrawer()
+                        cumulativeDrag > SWIPE_DOWN_THRESHOLD -> GestureHelper.expandNotificationShade(context)
+                    }
+                    cumulativeDrag = 0f
+                },
                 onDragCancel = { cumulativeDrag = 0f }
             )
         }.padding(horizontal = 24.dp, vertical = 20.dp),
@@ -533,7 +655,7 @@ private fun AnchorHomeScreen(
         }
         WorkspaceCard(
             workspaceSlots, appsByKey, iconsByKey, notificationCounts, widgetHostController,
-            isEditMode, selectedSlot, dragHoverTarget, dragSource,
+            isEditMode, selectedSlot, dragHoverTarget, dragSource, customLabels,
             onWorkspaceSlotTapped, onEnterEditMode, onWorkspaceSlotBoundsChanged,
             onWorkspaceDragStart, onWorkspaceDragMove, onWorkspaceDragEnd, onWorkspaceDragCancel
         )
@@ -550,6 +672,7 @@ private fun WorkspaceCard(
     notificationCounts: Map<String, Int>,
     widgetHostController: LauncherWidgetHostController,
     isEditMode: Boolean, selectedSlot: SlotSelection?, dragHoverTarget: SlotSelection?, dragSource: SlotSelection?,
+    customLabels: Map<String, String>,
     onWorkspaceSlotTapped: (Int) -> Unit, onLongPressEmptySlot: () -> Unit,
     onWorkspaceSlotBoundsChanged: (Int, Rect) -> Unit,
     onWorkspaceDragStart: (Int, Offset) -> Unit, onWorkspaceDragMove: (Offset) -> Unit,
@@ -571,6 +694,7 @@ private fun WorkspaceCard(
                     WorkspaceSlot(
                         content = content,
                         app = if (content is SlotContent.App) appsByKey[content.key] else null,
+                        displayLabel = if (content is SlotContent.App) customLabels[content.key] ?: appsByKey[content.key]?.label else null,
                         icon = ak?.let { iconsByKey[it] },
                         hasNotification = ak?.let { val pkg = it.substringBefore("/"); (notificationCounts[pkg] ?: 0) > 0 } ?: false,
                         widgetHostController = widgetHostController,
@@ -594,7 +718,7 @@ private fun WorkspaceCard(
 
 @Composable
 private fun WorkspaceSlot(
-    content: SlotContent?, app: LauncherApp?, icon: ResolvedIcon?, hasNotification: Boolean,
+    content: SlotContent?, app: LauncherApp?, displayLabel: String?, icon: ResolvedIcon?, hasNotification: Boolean,
     widgetHostController: LauncherWidgetHostController,
     isEditMode: Boolean, isSelected: Boolean, isDropTarget: Boolean, isDragSource: Boolean,
     onTap: () -> Unit, onLongPressEmpty: () -> Unit, onBoundsChanged: (Rect) -> Unit,
@@ -658,7 +782,7 @@ private fun WorkspaceSlot(
             if (hasNotification && !isEditMode) NotificationDot(modifier = Modifier.align(Alignment.TopEnd))
         }
         Text(
-            text = when { content is SlotContent.App && app != null -> app.label; content is SlotContent.Widget -> "Widget"; isEditMode -> "Empty"; else -> "" },
+            text = when { content is SlotContent.App && app != null -> displayLabel ?: app.label; content is SlotContent.Widget -> "Widget"; isEditMode -> "Empty"; else -> "" },
             maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center
         )
     }
@@ -669,9 +793,14 @@ private fun WorkspaceSlot(
 @Composable
 private fun EditModeOverlay(
     leftCount: Int, rightCount: Int,
+    iconPacks: List<IconPackInfo>,
+    activeIconPack: String?,
     onAddLeft: () -> Unit, onAddRight: () -> Unit, onWidgets: () -> Unit, onDone: () -> Unit,
+    onIconPackSelected: (String?) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showIconPacks by remember { mutableStateOf(false) }
+
     Surface(modifier = modifier, shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.buttonCornerRadius), tonalElevation = 8.dp, shadowElevation = 8.dp, color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f)) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Edit Mode", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -681,6 +810,42 @@ private fun EditModeOverlay(
                 FilledTonalButton(onClick = onAddLeft) { Text("Add Left") }
                 FilledTonalButton(onClick = onAddRight) { Text("Add Right") }
                 OutlinedButton(onClick = onDone) { Text("Done") }
+            }
+            if (iconPacks.isNotEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Icons:", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Surface(
+                        onClick = { showIconPacks = !showIconPacks },
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer
+                    ) {
+                        Text(
+                            text = activeIconPack?.let { pkg -> iconPacks.find { it.packageName == pkg }?.label ?: "System" } ?: "System",
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+                }
+                if (showIconPacks) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Surface(
+                            onClick = { onIconPackSelected(null); showIconPacks = false },
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                            color = if (activeIconPack == null) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                        ) {
+                            Text("System Default", modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.labelLarge)
+                        }
+                        iconPacks.forEach { pack ->
+                            Surface(
+                                onClick = { onIconPackSelected(pack.packageName); showIconPacks = false },
+                                shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                                color = if (activeIconPack == pack.packageName) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Text(pack.label, modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -717,6 +882,7 @@ private fun GlobalDock(
     iconsByKey: Map<String, ResolvedIcon>, notificationCounts: Map<String, Int>,
     widgetHostController: LauncherWidgetHostController,
     isEditMode: Boolean, selectedSlot: SlotSelection?, dragHoverTarget: SlotSelection?, dragSource: SlotSelection?,
+    customLabels: Map<String, String>,
     onDockSlotTapped: (Int) -> Unit, onDockSlotBoundsChanged: (Int, Rect) -> Unit,
     onDockDragStart: (Int, Offset) -> Unit, onDockDragMove: (Offset) -> Unit,
     onDockDragEnd: () -> Unit, onDockDragCancel: () -> Unit, onOpenDrawer: () -> Unit,
@@ -729,6 +895,7 @@ private fun GlobalDock(
                 val ak = if (content is SlotContent.App) content.key else null
                 DockSlot(
                     content = content, app = if (content is SlotContent.App) appsByKey[content.key] else null,
+                    displayLabel = if (content is SlotContent.App) customLabels[content.key] ?: appsByKey[content.key]?.label else null,
                     icon = ak?.let { iconsByKey[it] },
                     hasNotification = ak?.let { val pkg = it.substringBefore("/"); (notificationCounts[pkg] ?: 0) > 0 } ?: false,
                     widgetHostController = widgetHostController,
@@ -751,7 +918,7 @@ private fun GlobalDock(
 
 @Composable
 private fun DockSlot(
-    content: SlotContent?, app: LauncherApp?, icon: ResolvedIcon?, hasNotification: Boolean,
+    content: SlotContent?, app: LauncherApp?, displayLabel: String?, icon: ResolvedIcon?, hasNotification: Boolean,
     widgetHostController: LauncherWidgetHostController,
     isEditMode: Boolean, isSelected: Boolean, isDropTarget: Boolean, isDragSource: Boolean,
     onTap: () -> Unit, onBoundsChanged: (Rect) -> Unit,
@@ -804,7 +971,7 @@ private fun DockSlot(
             if (hasNotification && !isEditMode) NotificationDot(modifier = Modifier.align(Alignment.TopEnd))
         }
         Text(
-            text = when { content is SlotContent.App && app != null -> app.label; content is SlotContent.Widget -> "Widget"; isEditMode -> "Empty"; else -> "" },
+            text = when { content is SlotContent.App && app != null -> displayLabel ?: app.label; content is SlotContent.Widget -> "Widget"; isEditMode -> "Empty"; else -> "" },
             style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center
         )
     }
@@ -827,35 +994,121 @@ private fun DraggedAppPreview(label: String, modifier: Modifier = Modifier) {
 private fun AppDrawerSheet(
     isLoading: Boolean, apps: List<LauncherApp>, icons: Map<String, ResolvedIcon>,
     notificationCounts: Map<String, Int>, searchQuery: String,
-    onSearchQueryChanged: (String) -> Unit, onAppClicked: (LauncherApp) -> Unit
+    customLabels: Map<String, String>,
+    onSearchQueryChanged: (String) -> Unit, onAppClicked: (LauncherApp) -> Unit,
+    onHideApp: (String) -> Unit, onRenameApp: (String, String) -> Unit
 ) {
+    var selectedCategory by remember { mutableStateOf<AppCategory?>(null) }
+    var renameDialogApp by remember { mutableStateOf<LauncherApp?>(null) }
+    var renameText by remember { mutableStateOf("") }
+
+    val categorizedApps by remember(apps, selectedCategory) {
+        derivedStateOf {
+            when (selectedCategory) {
+                null -> apps
+                else -> apps.filter { it.category == selectedCategory }
+            }
+        }
+    }
+
+    val availableCategories by remember(apps) {
+        derivedStateOf {
+            apps.groupBy { it.category }
+                .filter { it.key != AppCategory.Other && it.value.size >= 2 }
+                .keys
+                .sortedBy { it.ordinal }
+        }
+    }
+
     Column(modifier = Modifier.fillMaxWidth().imePadding().padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("App Drawer", style = MaterialTheme.typography.displayMedium)
         OutlinedTextField(value = searchQuery, onValueChange = onSearchQueryChanged, modifier = Modifier.fillMaxWidth(), singleLine = true, leadingIcon = { Icon(Icons.Rounded.Search, null) }, placeholder = { Text("Search by name or package") })
+
+        if (availableCategories.isNotEmpty()) {
+            androidx.compose.foundation.lazy.LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(horizontal = 2.dp)
+            ) {
+                item {
+                    Surface(
+                        onClick = { selectedCategory = null },
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+                        color = if (selectedCategory == null) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        Text("All", modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+                items(availableCategories.size) { index ->
+                    val cat = availableCategories[index]
+                    Surface(
+                        onClick = { selectedCategory = if (selectedCategory == cat) null else cat },
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+                        color = if (selectedCategory == cat) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        Text(cat.label, modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+        }
+
         when {
             isLoading -> Box(modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-            apps.isEmpty() -> Text("No apps matched your search.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            categorizedApps.isEmpty() -> Text("No apps matched your search.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             else -> LazyColumn(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(items = apps, key = { a -> appKey(a) }) { app ->
-                    Surface(onClick = { onAppClicked(app) }, shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.listItemCornerRadius), tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
+                items(items = categorizedApps, key = { a -> appKey(a) }) { app ->
+                    val displayLabel = customLabels[appKey(app)] ?: app.label
+                    Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.listItemCornerRadius), tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
                         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Surface(modifier = Modifier.size(36.dp), shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                            Surface(modifier = Modifier.size(36.dp).clickable { onAppClicked(app) }, shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
                                 Box(contentAlignment = Alignment.Center) {
                                     val drawerIcon = icons[appKey(app)]
-                                    if (drawerIcon != null) Image(bitmap = drawerIcon.imageBitmap, contentDescription = app.label, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
-                                    else Text(text = app.label.firstOrNull()?.uppercaseChar()?.toString() ?: "?", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                                    if (drawerIcon != null) Image(bitmap = drawerIcon.imageBitmap, contentDescription = displayLabel, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+                                    else Text(text = displayLabel.firstOrNull()?.uppercaseChar()?.toString() ?: "?", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                                     if ((notificationCounts[app.packageName] ?: 0) > 0) NotificationDot(modifier = Modifier.align(Alignment.TopEnd))
                                 }
                             }
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text(text = app.label, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Column(modifier = Modifier.weight(1f).clickable { onAppClicked(app) }, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(text = displayLabel, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(text = app.packageName, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Row {
+                                IconButton(onClick = { renameDialogApp = app; renameText = customLabels[appKey(app)] ?: app.label }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Rounded.Edit, "Rename", modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                IconButton(onClick = { onHideApp(appKey(app)) }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Rounded.VisibilityOff, "Hide", modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    renameDialogApp?.let { app ->
+        AlertDialog(
+            onDismissRequest = { renameDialogApp = null },
+            title = { Text("Rename app") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    singleLine = true,
+                    label = { Text("Label") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onRenameApp(appKey(app), renameText)
+                    renameDialogApp = null
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameDialogApp = null }) { Text("Cancel") }
+            }
+        )
     }
 }
 
