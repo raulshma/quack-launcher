@@ -25,9 +25,17 @@ class MainActivity : ComponentActivity() {
     var pendingWidgetBind by mutableStateOf<PendingWidgetBind?>(null)
         private set
 
+    private val homeRolePrefs by lazy {
+        getSharedPreferences("quack_launcher_home_role", MODE_PRIVATE)
+    }
+
     private val requestHomeRoleLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ) { }
+    ) { result ->
+        if (result.resultCode != RESULT_OK) {
+            homeRolePrefs.edit().putBoolean("home_role_declined", true).apply()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -102,7 +110,8 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         val roleManager = getSystemService(RoleManager::class.java)
         if (roleManager.isRoleAvailable(RoleManager.ROLE_HOME) &&
-            !roleManager.isRoleHeld(RoleManager.ROLE_HOME)
+            !roleManager.isRoleHeld(RoleManager.ROLE_HOME) &&
+            !homeRolePrefs.getBoolean("home_role_declined", false)
         ) {
             requestHomeRoleLauncher.launch(
                 roleManager.createRequestRoleIntent(RoleManager.ROLE_HOME)
