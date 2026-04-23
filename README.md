@@ -1,6 +1,6 @@
-# minkoa
+# quack launcher
 
-An Android application.
+An Android launcher application.
 
 ## License
 
