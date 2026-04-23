@@ -68,13 +68,14 @@ private val dayFmt = DateTimeFormatter.ofPattern("EEE")
 
 @Composable
 fun WeatherScreen(
+    isActive: Boolean,
     modifier: Modifier = Modifier
 ) {
     val viewModel: WeatherViewModel = viewModel()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-    LaunchedEffect(Unit) {
-        if (!uiState.isLoaded && !uiState.isLoading) {
+    LaunchedEffect(isActive) {
+        if (isActive && !uiState.isLoaded && !uiState.isLoading) {
             viewModel.tryDeviceLocation()
             viewModel.loadWeather()
         }

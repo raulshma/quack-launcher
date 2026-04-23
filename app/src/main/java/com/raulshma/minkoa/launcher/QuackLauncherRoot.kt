@@ -4,8 +4,10 @@ import android.appwidget.AppWidgetProviderInfo
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.pm.ApplicationInfo
+import android.content.pm.LauncherApps
+import android.content.pm.PackageManager
+import android.os.Process
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.compose.animation.core.Spring
@@ -294,6 +296,40 @@ class LauncherViewModel(application: android.app.Application) :
     }
 
     private fun queryLaunchableApps(application: android.app.Application): List<LauncherApp> {
+        val appsFromLauncherService = runCatching {
+            val launcherApps = application.getSystemService(LauncherApps::class.java)
+            launcherApps
+                ?.getActivityList(null, Process.myUserHandle())
+                ?.asSequence()
+                ?.mapNotNull { activityInfo ->
+                    val component = activityInfo.componentName
+                    if (component.packageName == application.packageName) return@mapNotNull null
+                    val label = activityInfo.label?.toString()
+                        ?.takeIf { it.isNotBlank() }
+                        ?: component.className.substringAfterLast('.')
+                    LauncherApp(
+                        label = label,
+                        packageName = component.packageName,
+                        activityName = component.className,
+                        category = AppCategory.fromAppInfo(activityInfo.applicationInfo)
+                    )
+                }
+                ?.toList()
+                .orEmpty()
+        }.getOrDefault(emptyList())
+
+        val apps = if (appsFromLauncherService.isNotEmpty()) {
+            appsFromLauncherService
+        } else {
+            queryLaunchableAppsFromPackageManager(application)
+        }
+
+        return apps
+            .distinctBy(::appKey)
+            .sortedBy { it.label.lowercase(Locale.getDefault()) }
+    }
+
+    private fun queryLaunchableAppsFromPackageManager(application: android.app.Application): List<LauncherApp> {
         val packageManager = application.packageManager
         val launcherIntent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
@@ -307,13 +343,13 @@ class LauncherViewModel(application: android.app.Application) :
                 val label = resolveInfo.loadLabel(packageManager)?.toString()
                     ?.takeIf { it.isNotBlank() }
                     ?: activityInfo.name.substringAfterLast('.')
-                val category = try {
-                    AppCategory.fromAppInfo(packageManager.getApplicationInfo(activityInfo.packageName, 0))
-                } catch (_: Exception) { AppCategory.Other }
+                val category = runCatching {
+                    AppCategory.fromAppInfo(
+                        packageManager.getApplicationInfo(activityInfo.packageName, 0)
+                    )
+                }.getOrDefault(AppCategory.Other)
                 LauncherApp(label, activityInfo.packageName, activityInfo.name, category)
             }
-            .distinctBy { appKey(it) }
-            .sortedBy { it.label.lowercase(Locale.getDefault()) }
             .toList()
     }
 }
@@ -379,15 +415,24 @@ fun QuackLauncherRoot(
         label = "dock-fade"
     )
 
-    val filteredApps by remember(uiState.installedApps, uiState.searchQuery, uiState.hiddenApps) {
+    val filteredApps by remember(
+        uiState.installedApps,
+        uiState.searchQuery,
+        uiState.hiddenApps,
+        uiState.customLabels
+    ) {
         derivedStateOf {
             val q = uiState.searchQuery.trim()
             val visible = uiState.installedApps.filter { app ->
-                val key = appKey(app)
                 appKey(app) !in uiState.hiddenApps
             }
             if (q.isBlank()) visible
-            else visible.filter { it.label.contains(q, true) || it.packageName.contains(q, true) }
+            else visible.filter { app ->
+                val displayLabel = uiState.customLabels[appKey(app)] ?: app.label
+                displayLabel.contains(q, ignoreCase = true) ||
+                    app.label.contains(q, ignoreCase = true) ||
+                    app.packageName.contains(q, ignoreCase = true)
+            }
         }
     }
 
@@ -508,13 +553,21 @@ fun QuackLauncherRoot(
                         val offset = PAGER_ANCHOR_PAGE - page
                         val screenType = leftScreens.getOrNull(offset - 1)
                         if (screenType == null) UnassignedExtensionPage("Left", offset, isEditMode, { pendingScreenSide = ScreenSide.Left.name; isScreenEditorOpen = true }) { pagerScope.launch { pagerState.animateScrollToPage(PAGER_ANCHOR_PAGE) } }
-                        else when (screenType) { ExtensionScreenType.Gallery -> GalleryScreen(); ExtensionScreenType.Weather -> WeatherScreen(); ExtensionScreenType.Files -> FilesScreen() }
+                        else when (screenType) {
+                            ExtensionScreenType.Gallery -> GalleryScreen(isActive = page == pagerState.currentPage)
+                            ExtensionScreenType.Weather -> WeatherScreen(isActive = page == pagerState.currentPage)
+                            ExtensionScreenType.Files -> FilesScreen(isActive = page == pagerState.currentPage)
+                        }
                     }
                     else -> {
                         val offset = page - PAGER_ANCHOR_PAGE
                         val screenType = rightScreens.getOrNull(offset - 1)
                         if (screenType == null) UnassignedExtensionPage("Right", offset, isEditMode, { pendingScreenSide = ScreenSide.Right.name; isScreenEditorOpen = true }) { pagerScope.launch { pagerState.animateScrollToPage(PAGER_ANCHOR_PAGE) } }
-                        else when (screenType) { ExtensionScreenType.Gallery -> GalleryScreen(); ExtensionScreenType.Weather -> WeatherScreen(); ExtensionScreenType.Files -> FilesScreen() }
+                        else when (screenType) {
+                            ExtensionScreenType.Gallery -> GalleryScreen(isActive = page == pagerState.currentPage)
+                            ExtensionScreenType.Weather -> WeatherScreen(isActive = page == pagerState.currentPage)
+                            ExtensionScreenType.Files -> FilesScreen(isActive = page == pagerState.currentPage)
+                        }
                     }
                 }
             }
@@ -1162,8 +1215,17 @@ private fun NotificationDot(modifier: Modifier = Modifier) {
 private fun appKey(app: LauncherApp): String = "${app.packageName}/${app.activityName}"
 
 private fun launchApp(context: Context, app: LauncherApp) {
+    val targetComponent = ComponentName(app.packageName, app.activityName)
+    val launchedByLauncherApps = runCatching {
+        val launcherApps = context.getSystemService(LauncherApps::class.java) ?: return@runCatching false
+        launcherApps.startMainActivity(targetComponent, Process.myUserHandle(), null, null)
+        true
+    }.getOrDefault(false)
+
+    if (launchedByLauncherApps) return
+
     val launchIntent = Intent(Intent.ACTION_MAIN).apply {
-        component = ComponentName(app.packageName, app.activityName)
+        component = targetComponent
         addCategory(Intent.CATEGORY_LAUNCHER)
         flags = Intent.FLAG_ACTIVITY_NEW_TASK
     }

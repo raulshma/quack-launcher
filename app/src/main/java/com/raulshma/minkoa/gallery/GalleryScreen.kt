@@ -85,6 +85,7 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun GalleryScreen(
+    isActive: Boolean,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -117,8 +118,8 @@ fun GalleryScreen(
     val viewModel: GalleryViewModel = viewModel()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-    LaunchedEffect(Unit) {
-        if (!uiState.isLoaded && !uiState.isLoading) {
+    LaunchedEffect(isActive) {
+        if (isActive && !uiState.isLoaded && !uiState.isLoading) {
             viewModel.loadImages()
         }
     }

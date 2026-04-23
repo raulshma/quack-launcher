@@ -6,6 +6,9 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 import java.io.File
+import java.util.Locale
+
+private val blockedDirectoryNames = setOf("android", "lost.dir")
 
 data class FileItem(
     val id: Long,
@@ -155,7 +158,8 @@ class FilesRepository(private val context: Context) {
         val dir = File(path)
         if (!dir.exists() || !dir.isDirectory) return emptyList()
         return dir.listFiles()
-            ?.filterNot { it.name.startsWith(".") }
+            ?.asSequence()
+            ?.filter(::shouldDisplayEntry)
             ?.map { file ->
                 DirectoryEntry(
                     name = file.name,
@@ -167,7 +171,19 @@ class FilesRepository(private val context: Context) {
                 )
             }
             ?.sortedWith(compareByDescending<DirectoryEntry> { it.isDirectory }.thenBy { it.name.lowercase() })
+            ?.toList()
             ?: emptyList()
+    }
+
+    private fun shouldDisplayEntry(file: File): Boolean {
+        if (!file.canRead()) return false
+        if (file.isHidden) return false
+        val name = file.name
+        if (name.startsWith('.')) return false
+        if (file.isDirectory && name.lowercase(Locale.getDefault()) in blockedDirectoryNames) {
+            return false
+        }
+        return true
     }
 }
 

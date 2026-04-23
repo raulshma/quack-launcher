@@ -5,7 +5,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Environment
-import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
@@ -65,17 +64,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 @Composable
 fun FilesScreen(
+    isActive: Boolean,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -113,8 +111,8 @@ fun FilesScreen(
     val viewModel: FilesViewModel = viewModel()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-    LaunchedEffect(Unit) {
-        if (!uiState.isLoaded && !uiState.isLoading) {
+    LaunchedEffect(isActive) {
+        if (isActive && !uiState.isLoaded && !uiState.isLoading) {
             viewModel.loadFiles()
         }
     }
@@ -123,7 +121,6 @@ fun FilesScreen(
         uiState = uiState,
         onCategorySelected = { viewModel.selectCategory(it) },
         onOpenDirectory = { viewModel.openDirectory(it) },
-        onNavigateUp = { viewModel.navigateUp() },
         onExitDirectory = { viewModel.exitDirectoryBrowsing() },
         modifier = modifier
     )
@@ -134,7 +131,6 @@ private fun FilesContent(
     uiState: FilesUiState,
     onCategorySelected: (FileCategory?) -> Unit,
     onOpenDirectory: (String) -> Unit,
-    onNavigateUp: () -> Unit,
     onExitDirectory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -148,7 +144,6 @@ private fun FilesContent(
                 if (entry.isDirectory) onOpenDirectory(entry.path)
                 else openFileFromPath(context, entry.path)
             },
-            onNavigateUp = onNavigateUp,
             onExit = onExitDirectory
         )
         return
@@ -670,10 +665,8 @@ private fun DirectoryBrowser(
     path: String,
     entries: List<DirectoryEntry>,
     onEntryClick: (DirectoryEntry) -> Unit,
-    onNavigateUp: () -> Unit,
     onExit: () -> Unit
 ) {
-    val context = LocalContext.current
     val dirName = path.substringAfterLast("/")
 
     Column(
