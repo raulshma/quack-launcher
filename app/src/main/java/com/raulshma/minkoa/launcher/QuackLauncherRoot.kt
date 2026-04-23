@@ -775,7 +775,13 @@ fun QuackLauncherRoot(
     }
 
     if (isWidgetPickerOpen) {
-        WidgetPickerSheet(availableWidgets, { handleWidgetSelected(it) }) { isWidgetPickerOpen = false }
+        WidgetPickerSheet(
+            widgets = availableWidgets,
+            workspaceColumns = uiState.workspaceColumns,
+            workspaceRows = uiState.workspaceRows,
+            onSelectWidget = { handleWidgetSelected(it) },
+            onDismissRequest = { isWidgetPickerOpen = false }
+        )
     }
 
     if (isHomeSettingsOpen) {
