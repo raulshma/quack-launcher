@@ -14,7 +14,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-private val AuraTypography = Typography(
+private val QuackTypography = Typography(
     displayLarge = TextStyle(
         fontWeight = FontWeight.SemiBold,
         fontSize = 56.sp,
@@ -36,7 +36,7 @@ private val AuraTypography = Typography(
 )
 
 @Composable
-fun AuraLauncherTheme(
+fun QuackLauncherTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit
@@ -53,7 +53,7 @@ fun AuraLauncherTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = AuraTypography,
+        typography = QuackTypography,
         content = content
     )
 }

@@ -24,6 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "minkoa"
 include(":app")
-include(":baselineprofile")
-include(":benchmark")
  

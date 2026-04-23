@@ -8,7 +8,7 @@ import org.json.JSONObject
 class LayoutRepository(context: Context) {
 
     private val prefs: SharedPreferences =
-        context.getSharedPreferences("aura_launcher_layout", Context.MODE_PRIVATE)
+        context.getSharedPreferences("quack_launcher_layout", Context.MODE_PRIVATE)
 
     fun saveLayout(
         workspaceSlots: List<SlotContent?>,

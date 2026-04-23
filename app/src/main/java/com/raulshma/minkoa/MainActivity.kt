@@ -4,6 +4,7 @@ import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.os.Build
 import android.os.Bundle
+import android.app.role.RoleManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -14,8 +15,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.raulshma.minkoa.data.SlotContent
-import com.raulshma.minkoa.launcher.AuraLauncherRoot
-import com.raulshma.minkoa.ui.theme.AuraLauncherTheme
+import com.raulshma.minkoa.launcher.QuackLauncherRoot
+import com.raulshma.minkoa.ui.theme.QuackLauncherTheme
 import com.raulshma.minkoa.widget.LauncherWidgetHostController
 
 class MainActivity : ComponentActivity() {
@@ -23,6 +24,10 @@ class MainActivity : ComponentActivity() {
 
     var pendingWidgetBind by mutableStateOf<PendingWidgetBind?>(null)
         private set
+
+    private val requestHomeRoleLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,8 +62,8 @@ class MainActivity : ComponentActivity() {
                 pendingWidgetBind = null
             }
 
-            AuraLauncherTheme {
-                AuraLauncherRoot(
+            QuackLauncherTheme {
+                QuackLauncherRoot(
                     widgetHostController = widgetHostController,
                     requestWidgetBind = { appWidgetId, provider, onResult ->
                         val bound =
@@ -90,6 +95,18 @@ class MainActivity : ComponentActivity() {
                     }
                 )
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val roleManager = getSystemService(RoleManager::class.java)
+        if (roleManager.isRoleAvailable(RoleManager.ROLE_HOME) &&
+            !roleManager.isRoleHeld(RoleManager.ROLE_HOME)
+        ) {
+            requestHomeRoleLauncher.launch(
+                roleManager.createRequestRoleIntent(RoleManager.ROLE_HOME)
+            )
         }
     }
 

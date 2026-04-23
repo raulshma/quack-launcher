@@ -250,7 +250,7 @@ class LauncherViewModel(application: android.app.Application) :
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun AuraLauncherRoot(
+fun QuackLauncherRoot(
     viewModel: LauncherViewModel = viewModel(),
     widgetHostController: LauncherWidgetHostController,
     requestWidgetBind: (
