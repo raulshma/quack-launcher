@@ -140,10 +140,6 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 private const val PAGER_ANCHOR_PAGE = Int.MAX_VALUE / 2
-private const val WORKSPACE_COLUMNS = 4
-private const val WORKSPACE_ROWS = 5
-private const val WORKSPACE_SLOTS = WORKSPACE_COLUMNS * WORKSPACE_ROWS
-private const val DOCK_APP_SLOTS = 5
 private const val SWIPE_UP_THRESHOLD = -120f
 private const val SWIPE_DOWN_THRESHOLD = 120f
 
@@ -233,7 +229,10 @@ data class LauncherUiState(
     val hiddenApps: Set<String> = emptySet(),
     val customLabels: Map<String, String> = emptyMap(),
     val iconBackground: IconBackground = IconBackground.Default,
-    val iconShape: IconShape = IconShape.Rounded
+    val iconShape: IconShape = IconShape.Rounded,
+    val workspaceColumns: Int = 4,
+    val workspaceRows: Int = 5,
+    val dockSlots: Int = 5
 )
 
 class LauncherViewModel(application: android.app.Application) :
@@ -248,7 +247,15 @@ class LauncherViewModel(application: android.app.Application) :
     init {
         val iconBackground = appPrefs.getIconBackground()
         val iconShape = appPrefs.getIconShape()
-        _uiState.update { it.copy(iconBackground = iconBackground, iconShape = iconShape) }
+        _uiState.update {
+            it.copy(
+                iconBackground = iconBackground,
+                iconShape = iconShape,
+                workspaceColumns = appPrefs.getWorkspaceColumns(),
+                workspaceRows = appPrefs.getWorkspaceRows(),
+                dockSlots = appPrefs.getDockSlots()
+            )
+        }
         refreshApps()
     }
 
@@ -260,6 +267,21 @@ class LauncherViewModel(application: android.app.Application) :
     fun setIconShape(shape: IconShape) {
         appPrefs.setIconShape(shape)
         _uiState.update { it.copy(iconShape = shape) }
+    }
+
+    fun setWorkspaceColumns(value: Int) {
+        appPrefs.setWorkspaceColumns(value)
+        _uiState.update { it.copy(workspaceColumns = appPrefs.getWorkspaceColumns()) }
+    }
+
+    fun setWorkspaceRows(value: Int) {
+        appPrefs.setWorkspaceRows(value)
+        _uiState.update { it.copy(workspaceRows = appPrefs.getWorkspaceRows()) }
+    }
+
+    fun setDockSlots(value: Int) {
+        appPrefs.setDockSlots(value)
+        _uiState.update { it.copy(dockSlots = appPrefs.getDockSlots()) }
     }
 
     fun onSearchQueryChanged(query: String) {
@@ -340,13 +362,9 @@ class LauncherViewModel(application: android.app.Application) :
                 .orEmpty()
         }.getOrDefault(emptyList())
 
-        val apps = if (appsFromLauncherService.isNotEmpty()) {
-            appsFromLauncherService
-        } else {
-            queryLaunchableAppsFromPackageManager(application)
-        }
+        val pmApps = queryLaunchableAppsFromPackageManager(application)
 
-        return apps
+        return (appsFromLauncherService + pmApps)
             .distinctBy(::appKey)
             .sortedBy { it.label.lowercase(Locale.getDefault()) }
     }
@@ -393,7 +411,10 @@ fun QuackLauncherRoot(
     val pagerScope = rememberCoroutineScope()
     val appDrawerState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val layoutRepository = remember { LayoutRepository(context) }
-    val savedLayout = remember { layoutRepository.loadLayout() }
+    val workspaceSlotsCount = uiState.workspaceColumns * uiState.workspaceRows
+    val savedLayout = remember(uiState.workspaceColumns, uiState.workspaceRows, uiState.dockSlots) {
+        layoutRepository.loadLayout(workspaceSlotsCount, uiState.dockSlots)
+    }
     val notificationCounts by LauncherNotificationListener.notificationCounts.collectAsStateWithLifecycle()
 
     var isAppDrawerOpen by rememberSaveable { mutableStateOf(false) }
@@ -402,9 +423,13 @@ fun QuackLauncherRoot(
     var isWidgetPickerOpen by rememberSaveable { mutableStateOf(false) }
     var isHomeSettingsOpen by rememberSaveable { mutableStateOf(false) }
     var pendingScreenSide by rememberSaveable { mutableStateOf(ScreenSide.Left.name) }
-    var workspaceSlots by remember { mutableStateOf(validateWidgetSlots(savedLayout?.workspaceSlots ?: List(WORKSPACE_SLOTS) { null }, widgetHostController)) }
-    var dockSlots by remember { mutableStateOf(validateWidgetSlots(savedLayout?.dockSlots ?: List(DOCK_APP_SLOTS) { null }, widgetHostController)) }
-    var layoutInitialized by remember { mutableStateOf(savedLayout != null) }
+    var workspaceSlots by remember(savedLayout) {
+        mutableStateOf(validateWidgetSlots(savedLayout?.workspaceSlots ?: List(workspaceSlotsCount) { null }, widgetHostController))
+    }
+    var dockSlots by remember(savedLayout) {
+        mutableStateOf(validateWidgetSlots(savedLayout?.dockSlots ?: List(uiState.dockSlots) { null }, widgetHostController))
+    }
+    var layoutInitialized by remember(savedLayout) { mutableStateOf(savedLayout != null) }
     var selectedSlot by remember { mutableStateOf<SlotSelection?>(null) }
     val workspaceBounds = remember { mutableStateMapOf<Int, Rect>() }
     val dockBounds = remember { mutableStateMapOf<Int, Rect>() }
@@ -419,11 +444,11 @@ fun QuackLauncherRoot(
     val appsByKey = remember(uiState.installedApps) { uiState.installedApps.associateBy(::appKey) }
     val iconsByKey = remember(uiState.icons) { uiState.icons }
 
-    LaunchedEffect(uiState.installedApps, layoutInitialized) {
+    LaunchedEffect(uiState.installedApps, layoutInitialized, workspaceSlotsCount, uiState.dockSlots) {
         if (!layoutInitialized && uiState.installedApps.isNotEmpty()) {
             val installedKeys = uiState.installedApps.map(::appKey)
-            workspaceSlots = List(WORKSPACE_SLOTS) { index -> installedKeys.getOrNull(index)?.let { SlotContent.App(it) } }
-            dockSlots = List(DOCK_APP_SLOTS) { index -> installedKeys.getOrNull(index)?.let { SlotContent.App(it) } }
+            workspaceSlots = List(workspaceSlotsCount) { index -> installedKeys.getOrNull(index)?.let { SlotContent.App(it) } }
+            dockSlots = List(uiState.dockSlots) { index -> installedKeys.getOrNull(index)?.let { SlotContent.App(it) } }
             layoutInitialized = true
         }
     }
@@ -520,8 +545,14 @@ fun QuackLauncherRoot(
 
     fun cancelDrag() { dragInProgress = null; dragHoverTarget = null }
 
+    fun isSlotBlocked(area: SlotArea, index: Int): Boolean {
+        if (area != SlotArea.Workspace) return false
+        return isSlotBlockedByWidget(workspaceSlots, uiState.workspaceColumns, index)
+    }
+
     fun handleSlotTap(area: SlotArea, index: Int) {
         if (dragInProgress != null) return
+        if (isSlotBlocked(area, index)) return
         val tapped = SlotSelection(area, index)
         val tappedContent = contentAtSlot(tapped)
         if (!isEditMode) {
@@ -535,17 +566,71 @@ fun QuackLauncherRoot(
         }
     }
 
+    fun canPlaceWidgetAt(index: Int, spanX: Int, spanY: Int, excludeIndex: Int = -1): Boolean {
+        val col = index % uiState.workspaceColumns
+        val row = index / uiState.workspaceColumns
+        val effectiveSpanX = spanX.coerceAtLeast(1).coerceAtMost(uiState.workspaceColumns - col)
+        val effectiveSpanY = spanY.coerceAtLeast(1)
+        for (i in workspaceSlots.indices) {
+            if (i == excludeIndex) continue
+            if (workspaceSlots[i] == null) continue
+            val slotRow = i / uiState.workspaceColumns
+            val slotCol = i % uiState.workspaceColumns
+            if (slotRow >= row && slotRow < row + effectiveSpanY &&
+                slotCol >= col && slotCol < col + effectiveSpanX
+            ) {
+                return false
+            }
+        }
+        return true
+    }
+
+    fun firstEmptyWorkspaceSlot(spanX: Int = 1, spanY: Int = 1): Int {
+        for (i in workspaceSlots.indices) {
+            if (workspaceSlots[i] != null) continue
+            if (isSlotBlockedByWidget(workspaceSlots, uiState.workspaceColumns, i)) continue
+            if (spanX == 1 && spanY == 1) return i
+            if (canPlaceWidgetAt(i, spanX, spanY)) return i
+        }
+        return -1
+    }
+
+    fun placeWidget(widget: SlotContent.Widget): Boolean {
+        val firstEmpty = firstEmptyWorkspaceSlot(widget.spanX, widget.spanY)
+        return if (firstEmpty >= 0) {
+            workspaceSlots = workspaceSlots.toMutableList().apply { this[firstEmpty] = widget }
+            persistLayout()
+            true
+        } else false
+    }
+
     fun handleWidgetSelected(providerInfo: AppWidgetProviderInfo) {
         val appWidgetId = widgetHostController.allocateAppWidgetId()
         val provider = providerInfo.provider
         requestWidgetBind(appWidgetId, provider) { widgetSlot ->
             if (widgetSlot != null) {
+                val spanX = providerInfo.minWidth.coerceAtLeast(70) / 70
+                val spanY = providerInfo.minHeight.coerceAtLeast(70) / 70
+                val sizedWidget = SlotContent.Widget(
+                    appWidgetId = widgetSlot.appWidgetId,
+                    providerPkg = widgetSlot.providerPkg,
+                    providerCls = widgetSlot.providerCls,
+                    spanX = spanX.coerceAtLeast(1).coerceAtMost(uiState.workspaceColumns),
+                    spanY = spanY.coerceAtLeast(1).coerceAtMost(uiState.workspaceRows)
+                )
                 val target = selectedSlot
-                if (target != null) { assignSlot(target, widgetSlot); selectedSlot = null }
-                else {
-                    val firstEmpty = workspaceSlots.indexOfFirst { it == null }
-                    if (firstEmpty >= 0) { workspaceSlots = workspaceSlots.toMutableList().apply { this[firstEmpty] = widgetSlot }; persistLayout() }
-                    else widgetHostController.deleteAppWidgetId(appWidgetId)
+                if (target != null && target.area == SlotArea.Workspace) {
+                    val currentContent = contentAtSlot(target)
+                    if (currentContent == null && canPlaceWidgetAt(target.index, sizedWidget.spanX, sizedWidget.spanY)) {
+                        assignSlot(target, sizedWidget)
+                        selectedSlot = null
+                    } else if (!placeWidget(sizedWidget)) {
+                        widgetHostController.deleteAppWidgetId(appWidgetId)
+                    }
+                } else {
+                    if (!placeWidget(sizedWidget)) {
+                        widgetHostController.deleteAppWidgetId(appWidgetId)
+                    }
                 }
             }
             isWidgetPickerOpen = false
@@ -567,6 +652,8 @@ fun QuackLauncherRoot(
                         uiState.customLabels,
                         uiState.iconBackground,
                         uiState.iconShape,
+                        uiState.workspaceColumns,
+                        uiState.workspaceRows,
                         onOpenDrawer = { isAppDrawerOpen = true },
                         onOpenHomeSettings = { isHomeSettingsOpen = true },
                         onWorkspaceSlotTapped = { handleSlotTap(SlotArea.Workspace, it) },
@@ -603,6 +690,7 @@ fun QuackLauncherRoot(
                 uiState.customLabels,
                 uiState.iconBackground,
                 uiState.iconShape,
+                uiState.dockSlots,
                 onDockSlotTapped = { handleSlotTap(SlotArea.Dock, it) },
                 onDockSlotBoundsChanged = { i, b -> dockBounds[i] = b },
                 onDockDragStart = { i, p -> contentAtSlot(SlotSelection(SlotArea.Dock, i))?.let { beginDrag(SlotSelection(SlotArea.Dock, i), it, p) } },
@@ -616,13 +704,32 @@ fun QuackLauncherRoot(
                     DraggedAppPreview(label = drag.label, modifier = Modifier.offset { IntOffset((drag.pointerInRoot.x - 26f).roundToInt(), (drag.pointerInRoot.y - 26f).roundToInt()) })
                 }
                 val iconPacks = remember { viewModel.getInstalledIconPacks() }
+                val selectedContent = selectedSlot?.let { contentAtSlot(it) }
                 EditModeOverlay(
                     leftScreens.size, rightScreens.size, iconPacks, viewModel.activeIconPack,
+                    selectedSlotContent = selectedContent,
                     onAddLeft = { pendingScreenSide = ScreenSide.Left.name; isScreenEditorOpen = true },
                     onAddRight = { pendingScreenSide = ScreenSide.Right.name; isScreenEditorOpen = true },
                     onWidgets = { isWidgetPickerOpen = true },
                     onDone = { isEditMode = false; selectedSlot = null },
                     onIconPackSelected = { viewModel.setIconPack(it) },
+                    onRemoveSelected = {
+                        selectedSlot?.let { assignSlot(it, null); selectedSlot = null }
+                    },
+                    onResizeWidget = { sx, sy ->
+                        selectedSlot?.let { sel ->
+                            val content = contentAtSlot(sel)
+                            if (content is SlotContent.Widget) {
+                                val col = sel.index % uiState.workspaceColumns
+                                val maxSpanX = uiState.workspaceColumns - col
+                                val newSpanX = sx.coerceAtLeast(1).coerceAtMost(maxSpanX)
+                                val newSpanY = sy.coerceAtLeast(1)
+                                if (canPlaceWidgetAt(sel.index, newSpanX, newSpanY, sel.index)) {
+                                    assignSlot(sel, content.copy(spanX = newSpanX, spanY = newSpanY))
+                                }
+                            }
+                        }
+                    },
                     modifier = Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(horizontal = 12.dp, vertical = 8.dp)
                 )
             }
@@ -646,7 +753,7 @@ fun QuackLauncherRoot(
                     if (isEditMode) {
                         if (selected != null) { assignSlot(selected, SlotContent.App(appKey(app))); selectedSlot = null }
                         else {
-                            val firstEmpty = workspaceSlots.indexOfFirst { it == null }
+                            val firstEmpty = firstEmptyWorkspaceSlot()
                             if (firstEmpty >= 0) { workspaceSlots = workspaceSlots.toMutableList().apply { this[firstEmpty] = SlotContent.App(appKey(app)) }; persistLayout() }
                             else launchApp(context, app)
                         }
@@ -676,11 +783,17 @@ fun QuackLauncherRoot(
             isEditMode = isEditMode,
             iconBackground = uiState.iconBackground,
             iconShape = uiState.iconShape,
+            workspaceColumns = uiState.workspaceColumns,
+            workspaceRows = uiState.workspaceRows,
+            dockSlots = uiState.dockSlots,
             onDismiss = { isHomeSettingsOpen = false },
             onToggleEditMode = { isEditMode = !isEditMode; selectedSlot = null },
             onOpenWidgets = { isWidgetPickerOpen = true },
             onSetIconBackground = { viewModel.setIconBackground(it) },
-            onSetIconShape = { viewModel.setIconShape(it) }
+            onSetIconShape = { viewModel.setIconShape(it) },
+            onSetWorkspaceColumns = { viewModel.setWorkspaceColumns(it) },
+            onSetWorkspaceRows = { viewModel.setWorkspaceRows(it) },
+            onSetDockSlots = { viewModel.setDockSlots(it) }
         )
     }
 }
@@ -701,6 +814,8 @@ private fun AnchorHomeScreen(
     customLabels: Map<String, String>,
     iconBackground: IconBackground,
     iconShape: IconShape,
+    workspaceColumns: Int,
+    workspaceRows: Int,
     onOpenDrawer: () -> Unit,
     onOpenHomeSettings: () -> Unit,
     onWorkspaceSlotTapped: (Int) -> Unit,
@@ -744,6 +859,7 @@ private fun AnchorHomeScreen(
             workspaceSlots, appsByKey, iconsByKey, notificationCounts, widgetHostController,
             isEditMode, selectedSlot, dragHoverTarget, dragSource, customLabels,
             iconBackground, iconShape,
+            workspaceColumns, workspaceRows,
             onWorkspaceSlotTapped, onOpenHomeSettings, onWorkspaceSlotBoundsChanged,
             onWorkspaceDragStart, onWorkspaceDragMove, onWorkspaceDragEnd, onWorkspaceDragCancel,
             modifier = Modifier.weight(1f).padding(top = 8.dp)
@@ -764,47 +880,57 @@ private fun WorkspaceCard(
     customLabels: Map<String, String>,
     iconBackground: IconBackground,
     iconShape: IconShape,
+    workspaceColumns: Int,
+    workspaceRows: Int,
     onWorkspaceSlotTapped: (Int) -> Unit, onLongPressEmptySlot: () -> Unit,
     onWorkspaceSlotBoundsChanged: (Int, Rect) -> Unit,
     onWorkspaceDragStart: (Int, Offset) -> Unit, onWorkspaceDragMove: (Offset) -> Unit,
     onWorkspaceDragEnd: () -> Unit, onWorkspaceDragCancel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Column(
-        modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        repeat(WORKSPACE_ROWS) { rowIndex ->
-            Row(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                repeat(WORKSPACE_COLUMNS) { colIndex ->
-                    val index = rowIndex * WORKSPACE_COLUMNS + colIndex
-                    val content = workspaceSlots.getOrNull(index)
-                    val ak = if (content is SlotContent.App) content.key else null
-                    WorkspaceSlot(
-                        content = content,
-                        app = if (content is SlotContent.App) appsByKey[content.key] else null,
-                        displayLabel = if (content is SlotContent.App) customLabels[content.key] ?: appsByKey[content.key]?.label else null,
-                        icon = ak?.let { iconsByKey[it] },
-                        hasNotification = ak?.let { val pkg = it.substringBefore("/"); (notificationCounts[pkg] ?: 0) > 0 } ?: false,
-                        widgetHostController = widgetHostController,
-                        isEditMode = isEditMode,
-                        isSelected = selectedSlot == SlotSelection(SlotArea.Workspace, index),
-                        isDropTarget = dragHoverTarget == SlotSelection(SlotArea.Workspace, index),
-                        isDragSource = dragSource == SlotSelection(SlotArea.Workspace, index),
-                        iconBackground = iconBackground,
-                        iconShape = iconShape,
-                        onTap = { onWorkspaceSlotTapped(index) },
-                        onLongPressEmpty = { if (content == null) onLongPressEmptySlot() },
-                        onBoundsChanged = { onWorkspaceSlotBoundsChanged(index, it) },
-                        onDragStart = { onWorkspaceDragStart(index, it) },
-                        onDragMove = onWorkspaceDragMove, onDragEnd = onWorkspaceDragEnd, onDragCancel = onWorkspaceDragCancel,
-                        modifier = Modifier.weight(1f).fillMaxHeight()
-                    )
-                }
-            }
+    BoxWithConstraints(modifier = modifier) {
+        val cellWidth = maxWidth / workspaceColumns
+        val cellHeight = maxHeight / workspaceRows
+
+        workspaceSlots.forEachIndexed { index, content ->
+            if (isSlotBlockedByWidget(workspaceSlots, workspaceColumns, index)) return@forEachIndexed
+
+            val row = index / workspaceColumns
+            val col = index % workspaceColumns
+
+            val slotWidth = if (content is SlotContent.Widget) {
+                cellWidth * content.spanX.coerceAtLeast(1).coerceAtMost(workspaceColumns - col)
+            } else cellWidth
+
+            val slotHeight = if (content is SlotContent.Widget) {
+                cellHeight * content.spanY.coerceAtLeast(1)
+            } else cellHeight
+
+            val ak = if (content is SlotContent.App) content.key else null
+
+            WorkspaceSlot(
+                content = content,
+                app = if (content is SlotContent.App) appsByKey[content.key] else null,
+                displayLabel = if (content is SlotContent.App) customLabels[content.key] ?: appsByKey[content.key]?.label else null,
+                icon = ak?.let { iconsByKey[it] },
+                hasNotification = ak?.let { val pkg = it.substringBefore("/"); (notificationCounts[pkg] ?: 0) > 0 } ?: false,
+                widgetHostController = widgetHostController,
+                isEditMode = isEditMode,
+                isSelected = selectedSlot == SlotSelection(SlotArea.Workspace, index),
+                isDropTarget = dragHoverTarget == SlotSelection(SlotArea.Workspace, index),
+                isDragSource = dragSource == SlotSelection(SlotArea.Workspace, index),
+                isBlocked = false,
+                iconBackground = iconBackground,
+                iconShape = iconShape,
+                onTap = { onWorkspaceSlotTapped(index) },
+                onLongPressEmpty = { if (content == null) onLongPressEmptySlot() },
+                onBoundsChanged = { onWorkspaceSlotBoundsChanged(index, it) },
+                onDragStart = { onWorkspaceDragStart(index, it) },
+                onDragMove = onWorkspaceDragMove, onDragEnd = onWorkspaceDragEnd, onDragCancel = onWorkspaceDragCancel,
+                modifier = Modifier
+                    .offset(x = cellWidth * col, y = cellHeight * row)
+                    .size(slotWidth, slotHeight)
+            )
         }
     }
 }
@@ -816,12 +942,18 @@ private fun WorkspaceSlot(
     content: SlotContent?, app: LauncherApp?, displayLabel: String?, icon: ResolvedIcon?, hasNotification: Boolean,
     widgetHostController: LauncherWidgetHostController,
     isEditMode: Boolean, isSelected: Boolean, isDropTarget: Boolean, isDragSource: Boolean,
+    isBlocked: Boolean,
     iconBackground: IconBackground,
     iconShape: IconShape,
     onTap: () -> Unit, onLongPressEmpty: () -> Unit, onBoundsChanged: (Rect) -> Unit,
     onDragStart: (Offset) -> Unit, onDragMove: (Offset) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    if (isBlocked) {
+        Box(modifier = modifier.fillMaxSize())
+        return
+    }
+
     var slotBounds by remember { mutableStateOf<Rect?>(null) }
     val motionTokens = LocalMotionTokens.current
     val shapeTokens = LocalShapeTokens.current
@@ -843,60 +975,108 @@ private fun WorkspaceSlot(
         content == null -> Color.Transparent
         content is SlotContent.Widget -> MaterialTheme.colorScheme.primaryContainer
         else -> when (iconBackground) {
-            IconBackground.Default -> MaterialTheme.colorScheme.secondaryContainer
+            IconBackground.Default -> MaterialTheme.colorScheme.surfaceVariant
             IconBackground.Transparent -> Color.Transparent
             IconBackground.Surface -> MaterialTheme.colorScheme.surface
             IconBackground.Primary -> MaterialTheme.colorScheme.primaryContainer
             IconBackground.Secondary -> MaterialTheme.colorScheme.secondaryContainer
         }
     }
+    val isWidget = content is SlotContent.Widget
 
     BoxWithConstraints(modifier = modifier, contentAlignment = Alignment.Center) {
-        val iconSize = minOf(maxWidth, maxHeight - 18.dp).coerceAtMost(64.dp)
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Box {
-                Surface(
-                    modifier = Modifier.size(iconSize).graphicsLayer { scaleX = scale; scaleY = scale }
-                        .onGloballyPositioned { slotBounds = it.boundsInRoot(); onBoundsChanged(it.boundsInRoot()) }
-                        .pointerInput(content, isEditMode) { detectTapGestures(onTap = { onTap() }, onLongPress = { if (content == null) onLongPressEmpty() }) }
-                        .pointerInput(content, isEditMode) {
-                            if (!isEditMode || content == null) return@pointerInput
-                            var currentPointer = Offset.Zero
-                            detectDragGesturesAfterLongPress(
-                                onDragStart = { localOffset -> currentPointer = (slotBounds?.topLeft ?: Offset.Zero) + localOffset; onDragStart(currentPointer) },
-                                onDrag = { change, dragAmount -> change.consume(); currentPointer += dragAmount; onDragMove(currentPointer) },
-                                onDragEnd = { onDragEnd() }, onDragCancel = { onDragCancel() }
-                            )
-                        },
-                    shape = shape,
-                    color = bgColor
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        when (content) {
-                            null -> {}
-                            is SlotContent.App -> {
-                                if (icon != null) Image(bitmap = icon.imageBitmap, contentDescription = app?.label, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
-                                else Text(text = (app?.label?.firstOrNull()?.uppercaseChar()?.toString() ?: "?"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        val iconSize = minOf(maxWidth, maxHeight - if (isWidget) 0.dp else 18.dp).coerceAtMost(64.dp)
+
+        if (isWidget) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { scaleX = scale; scaleY = scale },
+                shape = shape,
+                color = bgColor
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    val providerInfo = remember(content.appWidgetId) { widgetHostController.getWidgetInfo(content.appWidgetId) }
+                    if (providerInfo != null) {
+                        AndroidView(factory = { ctx ->
+                            FrameLayout(ctx).apply {
+                                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+                                addView(widgetHostController.createHostView(content.appWidgetId, providerInfo).apply {
+                                    layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+                                })
                             }
-                            is SlotContent.Widget -> {
-                                val providerInfo = remember(content.appWidgetId) { widgetHostController.getWidgetInfo(content.appWidgetId) }
-                                if (providerInfo != null) {
-                                    AndroidView(factory = { ctx ->
-                                        FrameLayout(ctx).apply {
-                                            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-                                            addView(widgetHostController.createHostView(content.appWidgetId, providerInfo).apply { layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT) })
-                                        }
-                                    }, modifier = Modifier.fillMaxSize())
-                                } else Text("W", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        }, modifier = Modifier.fillMaxSize())
+                    } else {
+                        Text("W", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Box {
+                    Surface(
+                        modifier = Modifier.size(iconSize).graphicsLayer { scaleX = scale; scaleY = scale },
+                        shape = shape,
+                        color = bgColor
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            when (content) {
+                                null -> {}
+                                is SlotContent.App -> {
+                                    if (icon != null) Image(bitmap = icon.imageBitmap, contentDescription = app?.label, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+                                    else Text(text = (app?.label?.firstOrNull()?.uppercaseChar()?.toString() ?: "?"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                }
+                                else -> {}
                             }
                         }
                     }
+                    if (hasNotification && !isEditMode) NotificationDot(modifier = Modifier.align(Alignment.TopEnd))
                 }
-                if (hasNotification && !isEditMode) NotificationDot(modifier = Modifier.align(Alignment.TopEnd))
+                if (!isWidget) {
+                    Text(
+                        text = when { content is SlotContent.App && app != null -> displayLabel ?: app.label; isEditMode -> "Empty"; else -> "" },
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center
+                    )
+                }
             }
-            Text(
-                text = when { content is SlotContent.App && app != null -> displayLabel ?: app.label; content is SlotContent.Widget -> "Widget"; isEditMode -> "Empty"; else -> "" },
-                maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center
+        }
+
+        val needsOverlay = isEditMode || !isWidget
+        if (needsOverlay) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onGloballyPositioned { slotBounds = it.boundsInRoot(); onBoundsChanged(it.boundsInRoot()) }
+                    .pointerInput(content, isEditMode) {
+                        detectTapGestures(onTap = { onTap() }, onLongPress = { if (content == null) onLongPressEmpty() })
+                    }
+                    .pointerInput(content, isEditMode) {
+                        if (!isEditMode || content == null) return@pointerInput
+                        var currentPointer = Offset.Zero
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { localOffset ->
+                                currentPointer = (slotBounds?.topLeft ?: Offset.Zero) + localOffset
+                                onDragStart(currentPointer)
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                currentPointer += dragAmount
+                                onDragMove(currentPointer)
+                            },
+                            onDragEnd = { onDragEnd() },
+                            onDragCancel = { onDragCancel() }
+                        )
+                    }
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onGloballyPositioned { slotBounds = it.boundsInRoot(); onBoundsChanged(it.boundsInRoot()) }
             )
         }
     }
@@ -909,8 +1089,11 @@ private fun EditModeOverlay(
     leftCount: Int, rightCount: Int,
     iconPacks: List<IconPackInfo>,
     activeIconPack: String?,
+    selectedSlotContent: SlotContent?,
     onAddLeft: () -> Unit, onAddRight: () -> Unit, onWidgets: () -> Unit, onDone: () -> Unit,
     onIconPackSelected: (String?) -> Unit,
+    onRemoveSelected: () -> Unit,
+    onResizeWidget: (Int, Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showIconPacks by remember { mutableStateOf(false) }
@@ -924,6 +1107,27 @@ private fun EditModeOverlay(
                 FilledTonalButton(onClick = onAddLeft) { Text("Add Left") }
                 FilledTonalButton(onClick = onAddRight) { Text("Add Right") }
                 OutlinedButton(onClick = onDone) { Text("Done") }
+            }
+            if (selectedSlotContent != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    FilledTonalButton(onClick = onRemoveSelected, colors = androidx.compose.material3.ButtonDefaults.filledTonalButtonColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                        Text("Remove", color = MaterialTheme.colorScheme.onErrorContainer)
+                    }
+                    if (selectedSlotContent is SlotContent.Widget) {
+                        val currentSpanX = selectedSlotContent.spanX
+                        val currentSpanY = selectedSlotContent.spanY
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("W:", style = MaterialTheme.typography.labelLarge)
+                            IconButton(onClick = { onResizeWidget((currentSpanX - 1).coerceAtLeast(1), currentSpanY) }, modifier = Modifier.size(32.dp)) { Text("-", style = MaterialTheme.typography.titleMedium) }
+                            Text("$currentSpanX", style = MaterialTheme.typography.labelLarge)
+                            IconButton(onClick = { onResizeWidget(currentSpanX + 1, currentSpanY) }, modifier = Modifier.size(32.dp)) { Text("+", style = MaterialTheme.typography.titleMedium) }
+                            Text("\u00d7", style = MaterialTheme.typography.labelLarge)
+                            IconButton(onClick = { onResizeWidget(currentSpanX, (currentSpanY - 1).coerceAtLeast(1)) }, modifier = Modifier.size(32.dp)) { Text("-", style = MaterialTheme.typography.titleMedium) }
+                            Text("$currentSpanY", style = MaterialTheme.typography.labelLarge)
+                            IconButton(onClick = { onResizeWidget(currentSpanX, currentSpanY + 1) }, modifier = Modifier.size(32.dp)) { Text("+", style = MaterialTheme.typography.titleMedium) }
+                        }
+                    }
+                }
             }
             if (iconPacks.isNotEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -999,6 +1203,7 @@ private fun GlobalDock(
     customLabels: Map<String, String>,
     iconBackground: IconBackground,
     iconShape: IconShape,
+    dockSlotsCount: Int,
     onDockSlotTapped: (Int) -> Unit, onDockSlotBoundsChanged: (Int, Rect) -> Unit,
     onDockDragStart: (Int, Offset) -> Unit, onDockDragMove: (Offset) -> Unit,
     onDockDragEnd: () -> Unit, onDockDragCancel: () -> Unit, onOpenDrawer: () -> Unit,
@@ -1006,7 +1211,7 @@ private fun GlobalDock(
 ) {
     Surface(modifier = modifier, shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.dockCornerRadius), tonalElevation = 8.dp, shadowElevation = 10.dp, color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.95f)) {
         Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            repeat(DOCK_APP_SLOTS) { index ->
+            repeat(dockSlotsCount) { index ->
                 val content = slotContents.getOrNull(index)
                 val ak = if (content is SlotContent.App) content.key else null
                 DockSlot(
@@ -1024,7 +1229,8 @@ private fun GlobalDock(
                     onTap = { onDockSlotTapped(index) },
                     onBoundsChanged = { onDockSlotBoundsChanged(index, it) },
                     onDragStart = { onDockDragStart(index, it) },
-                    onDragMove = onDockDragMove, onDragEnd = onDockDragEnd, onDragCancel = onDockDragCancel
+                    onDragMove = onDockDragMove, onDragEnd = onDockDragEnd, onDragCancel = onDockDragCancel,
+                    modifier = Modifier.weight(1f)
                 )
             }
             IconButton(onClick = onOpenDrawer) { Icon(Icons.Rounded.Apps, "Open app drawer") }
@@ -1042,7 +1248,8 @@ private fun DockSlot(
     iconBackground: IconBackground,
     iconShape: IconShape,
     onTap: () -> Unit, onBoundsChanged: (Rect) -> Unit,
-    onDragStart: (Offset) -> Unit, onDragMove: (Offset) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit
+    onDragStart: (Offset) -> Unit, onDragMove: (Offset) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var slotBounds by remember { mutableStateOf<Rect?>(null) }
     val motionTokens = LocalMotionTokens.current
@@ -1065,7 +1272,7 @@ private fun DockSlot(
         content == null -> Color.Transparent
         content is SlotContent.Widget -> MaterialTheme.colorScheme.primaryContainer
         else -> when (iconBackground) {
-            IconBackground.Default -> MaterialTheme.colorScheme.primaryContainer
+            IconBackground.Default -> MaterialTheme.colorScheme.surfaceVariant
             IconBackground.Transparent -> Color.Transparent
             IconBackground.Surface -> MaterialTheme.colorScheme.surface
             IconBackground.Primary -> MaterialTheme.colorScheme.primaryContainer
@@ -1073,41 +1280,44 @@ private fun DockSlot(
         }
     }
 
-    Column(modifier = Modifier.widthIn(min = 48.dp, max = 64.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Box {
-            Surface(
-                modifier = Modifier.size(40.dp).graphicsLayer { scaleX = scale; scaleY = scale }
-                    .onGloballyPositioned { slotBounds = it.boundsInRoot(); onBoundsChanged(it.boundsInRoot()) }
-                    .pointerInput(content, isEditMode) { detectTapGestures(onTap = { onTap() }) }
-                    .pointerInput(content, isEditMode) {
-                        if (!isEditMode || content == null) return@pointerInput
-                        var currentPointer = Offset.Zero
-                        detectDragGesturesAfterLongPress(
-                            onDragStart = { localOffset -> currentPointer = (slotBounds?.topLeft ?: Offset.Zero) + localOffset; onDragStart(currentPointer) },
-                            onDrag = { change, dragAmount -> change.consume(); currentPointer += dragAmount; onDragMove(currentPointer) },
-                            onDragEnd = { onDragEnd() }, onDragCancel = { onDragCancel() }
-                        )
-                    },
-                shape = shape,
-                color = bgColor
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    when (content) {
-                        null -> {}
-                        is SlotContent.App -> {
-                            if (icon != null) Image(bitmap = icon.imageBitmap, contentDescription = app?.label, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
-                            else Text(text = (app?.label?.firstOrNull()?.uppercaseChar()?.toString() ?: "?"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    BoxWithConstraints(modifier = modifier, contentAlignment = Alignment.Center) {
+        val iconSize = minOf(maxWidth, maxHeight - 18.dp).coerceAtMost(64.dp)
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Box {
+                Surface(
+                    modifier = Modifier.size(iconSize).graphicsLayer { scaleX = scale; scaleY = scale }
+                        .onGloballyPositioned { slotBounds = it.boundsInRoot(); onBoundsChanged(it.boundsInRoot()) }
+                        .pointerInput(content, isEditMode) { detectTapGestures(onTap = { onTap() }) }
+                        .pointerInput(content, isEditMode) {
+                            if (!isEditMode || content == null) return@pointerInput
+                            var currentPointer = Offset.Zero
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { localOffset -> currentPointer = (slotBounds?.topLeft ?: Offset.Zero) + localOffset; onDragStart(currentPointer) },
+                                onDrag = { change, dragAmount -> change.consume(); currentPointer += dragAmount; onDragMove(currentPointer) },
+                                onDragEnd = { onDragEnd() }, onDragCancel = { onDragCancel() }
+                            )
+                        },
+                    shape = shape,
+                    color = bgColor
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        when (content) {
+                            null -> {}
+                            is SlotContent.App -> {
+                                if (icon != null) Image(bitmap = icon.imageBitmap, contentDescription = app?.label, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+                                else Text(text = (app?.label?.firstOrNull()?.uppercaseChar()?.toString() ?: "?"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            }
+                            is SlotContent.Widget -> Text("W", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         }
-                        is SlotContent.Widget -> Text("W", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     }
                 }
+                if (hasNotification && !isEditMode) NotificationDot(modifier = Modifier.align(Alignment.TopEnd))
             }
-            if (hasNotification && !isEditMode) NotificationDot(modifier = Modifier.align(Alignment.TopEnd))
+            Text(
+                text = when { content is SlotContent.App && app != null -> displayLabel ?: app.label; content is SlotContent.Widget -> "Widget"; isEditMode -> "Empty"; else -> "" },
+                style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center
+            )
         }
-        Text(
-            text = when { content is SlotContent.App && app != null -> displayLabel ?: app.label; content is SlotContent.Widget -> "Widget"; isEditMode -> "Empty"; else -> "" },
-            style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center
-        )
     }
 }
 
@@ -1416,11 +1626,17 @@ private fun HomeSettingsSheet(
     isEditMode: Boolean,
     iconBackground: IconBackground,
     iconShape: IconShape,
+    workspaceColumns: Int,
+    workspaceRows: Int,
+    dockSlots: Int,
     onDismiss: () -> Unit,
     onToggleEditMode: () -> Unit,
     onOpenWidgets: () -> Unit,
     onSetIconBackground: (IconBackground) -> Unit,
-    onSetIconShape: (IconShape) -> Unit
+    onSetIconShape: (IconShape) -> Unit,
+    onSetWorkspaceColumns: (Int) -> Unit,
+    onSetWorkspaceRows: (Int) -> Unit,
+    onSetDockSlots: (Int) -> Unit
 ) {
     val context = LocalContext.current
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -1464,6 +1680,52 @@ private fun HomeSettingsSheet(
                 Row(modifier = Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Rounded.PhotoLibrary, null)
                     Text("Wallpapers", modifier = Modifier.weight(1f))
+                }
+            }
+
+            Text("Grid Size", style = MaterialTheme.typography.titleMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Columns", modifier = Modifier.width(60.dp), style = MaterialTheme.typography.labelLarge)
+                (3..6).forEach { v ->
+                    val selected = workspaceColumns == v
+                    Surface(
+                        onClick = { onSetWorkspaceColumns(v) },
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(v.toString(), modifier = Modifier.padding(12.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Rows", modifier = Modifier.width(60.dp), style = MaterialTheme.typography.labelLarge)
+                (3..7).forEach { v ->
+                    val selected = workspaceRows == v
+                    Surface(
+                        onClick = { onSetWorkspaceRows(v) },
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(v.toString(), modifier = Modifier.padding(12.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+
+            Text("Dock Icons", style = MaterialTheme.typography.titleMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Count", modifier = Modifier.width(60.dp), style = MaterialTheme.typography.labelLarge)
+                (3..7).forEach { v ->
+                    val selected = dockSlots == v
+                    Surface(
+                        onClick = { onSetDockSlots(v) },
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(v.toString(), modifier = Modifier.padding(12.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.labelMedium)
+                    }
                 }
             }
 
@@ -1547,4 +1809,28 @@ private fun validateWidgetSlots(
         if (slot is SlotContent.Widget && !widgetHostController.isWidgetIdValid(slot.appWidgetId)) null
         else slot
     }
+}
+
+private fun isSlotBlockedByWidget(
+    slots: List<SlotContent?>,
+    columns: Int,
+    index: Int
+): Boolean {
+    for ((i, slot) in slots.withIndex()) {
+        if (slot is SlotContent.Widget) {
+            val widgetRow = i / columns
+            val widgetCol = i % columns
+            val indexRow = index / columns
+            val indexCol = index % columns
+            val effectiveSpanX = slot.spanX.coerceAtLeast(1).coerceAtMost(columns - widgetCol)
+            val effectiveSpanY = slot.spanY.coerceAtLeast(1)
+            if (indexRow >= widgetRow && indexRow < widgetRow + effectiveSpanY &&
+                indexCol >= widgetCol && indexCol < widgetCol + effectiveSpanX &&
+                index != i
+            ) {
+                return true
+            }
+        }
+    }
+    return false
 }

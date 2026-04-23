@@ -16,6 +16,14 @@ class SlotContentTest {
 
     @Test
     fun widgetSerializesAndDeserializes() {
+        val original = SlotContent.Widget(42, "com.example.widget", "com.example.WidgetProvider", 2, 3)
+        val serialized = original.serialize()
+        val deserialized = SlotContent.deserialize(serialized)
+        assertEquals(original, deserialized)
+    }
+
+    @Test
+    fun widgetWithDefaultSpansSerializesAndDeserializes() {
         val original = SlotContent.Widget(42, "com.example.widget", "com.example.WidgetProvider")
         val serialized = original.serialize()
         val deserialized = SlotContent.deserialize(serialized)
@@ -30,8 +38,14 @@ class SlotContentTest {
 
     @Test
     fun widgetSerializationFormat() {
+        val content = SlotContent.Widget(99, "com.pkg", "com.pkg.Provider", 2, 1)
+        assertEquals("widget:99:com.pkg:com.pkg.Provider:2:1", content.serialize())
+    }
+
+    @Test
+    fun widgetSerializationFormatWithDefaultSpans() {
         val content = SlotContent.Widget(99, "com.pkg", "com.pkg.Provider")
-        assertEquals("widget:99:com.pkg:com.pkg.Provider", content.serialize())
+        assertEquals("widget:99:com.pkg:com.pkg.Provider:1:1", content.serialize())
     }
 
     @Test
@@ -52,6 +66,18 @@ class SlotContentTest {
     @Test
     fun deserializeWidgetMissingPartsReturnsNull() {
         assertNull(SlotContent.deserialize("widget:42:com.pkg"))
+    }
+
+    @Test
+    fun deserializeWidgetBackwardsCompatibilityWithoutSpans() {
+        val deserialized = SlotContent.deserialize("widget:42:com.pkg:com.pkg.Provider")
+        assertNotNull(deserialized)
+        val widget = deserialized as SlotContent.Widget
+        assertEquals(42, widget.appWidgetId)
+        assertEquals("com.pkg", widget.providerPkg)
+        assertEquals("com.pkg.Provider", widget.providerCls)
+        assertEquals(1, widget.spanX)
+        assertEquals(1, widget.spanY)
     }
 
     @Test
@@ -76,8 +102,8 @@ class SlotContentTest {
 
     @Test
     fun widgetEquality() {
-        val w1 = SlotContent.Widget(1, "pkg", "cls")
-        val w2 = SlotContent.Widget(1, "pkg", "cls")
+        val w1 = SlotContent.Widget(1, "pkg", "cls", 2, 2)
+        val w2 = SlotContent.Widget(1, "pkg", "cls", 2, 2)
         assertEquals(w1, w2)
     }
 
@@ -92,6 +118,13 @@ class SlotContentTest {
     fun widgetInequalityDifferentPkg() {
         val w1 = SlotContent.Widget(1, "pkg1", "cls")
         val w2 = SlotContent.Widget(1, "pkg2", "cls")
+        assertNotEquals(w1, w2)
+    }
+
+    @Test
+    fun widgetInequalityDifferentSpan() {
+        val w1 = SlotContent.Widget(1, "pkg", "cls", 1, 1)
+        val w2 = SlotContent.Widget(1, "pkg", "cls", 2, 1)
         assertNotEquals(w1, w2)
     }
 

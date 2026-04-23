@@ -17,7 +17,7 @@ class LayoutRepository(context: Context) {
         rightScreenIds: List<String>
     ) {
         val json = JSONObject().apply {
-            put("v", 1)
+            put("v", 2)
             put("workspace", serializeSlots(workspaceSlots))
             put("dock", serializeSlots(dockSlots))
             put("leftScreens", JSONArray(leftScreenIds))
@@ -26,16 +26,16 @@ class LayoutRepository(context: Context) {
         prefs.edit().putString(KEY_LAYOUT, json.toString()).apply()
     }
 
-    fun loadLayout(): SavedLayout? {
+    fun loadLayout(workspaceSlotsCount: Int, dockSlotsCount: Int): SavedLayout? {
         val raw = prefs.getString(KEY_LAYOUT, null) ?: return null
         return try {
             val json = JSONObject(raw)
             SavedLayout(
                 workspaceSlots = deserializeSlots(
                     json.getJSONArray("workspace"),
-                    WORKSPACE_SLOTS
+                    workspaceSlotsCount
                 ),
-                dockSlots = deserializeSlots(json.getJSONArray("dock"), DOCK_SLOTS),
+                dockSlots = deserializeSlots(json.getJSONArray("dock"), dockSlotsCount),
                 leftScreenIds = deserializeStrings(json.optJSONArray("leftScreens")),
                 rightScreenIds = deserializeStrings(json.optJSONArray("rightScreens"))
             )
@@ -66,8 +66,6 @@ class LayoutRepository(context: Context) {
 
     companion object {
         private const val KEY_LAYOUT = "layout_json"
-        private const val WORKSPACE_SLOTS = 20
-        private const val DOCK_SLOTS = 5
     }
 }
 

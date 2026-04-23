@@ -87,10 +87,37 @@ class AppPreferencesRepository(context: Context) {
         prefs.edit().putString(KEY_ICON_SHAPE, shape.name).apply()
     }
 
+    fun getWorkspaceColumns(): Int {
+        return prefs.getInt(KEY_WORKSPACE_COLUMNS, 4).coerceIn(3, 6)
+    }
+
+    fun setWorkspaceColumns(value: Int) {
+        prefs.edit().putInt(KEY_WORKSPACE_COLUMNS, value.coerceIn(3, 6)).apply()
+    }
+
+    fun getWorkspaceRows(): Int {
+        return prefs.getInt(KEY_WORKSPACE_ROWS, 5).coerceIn(3, 7)
+    }
+
+    fun setWorkspaceRows(value: Int) {
+        prefs.edit().putInt(KEY_WORKSPACE_ROWS, value.coerceIn(3, 7)).apply()
+    }
+
+    fun getDockSlots(): Int {
+        return prefs.getInt(KEY_DOCK_SLOTS, 5).coerceIn(3, 7)
+    }
+
+    fun setDockSlots(value: Int) {
+        prefs.edit().putInt(KEY_DOCK_SLOTS, value.coerceIn(3, 7)).apply()
+    }
+
     companion object {
         private const val KEY_HIDDEN_APPS = "hidden_apps"
         private const val KEY_CUSTOM_LABELS = "custom_labels"
         private const val KEY_ICON_BACKGROUND = "icon_background"
         private const val KEY_ICON_SHAPE = "icon_shape"
+        private const val KEY_WORKSPACE_COLUMNS = "workspace_columns"
+        private const val KEY_WORKSPACE_ROWS = "workspace_rows"
+        private const val KEY_DOCK_SLOTS = "dock_slots"
     }
 }
