@@ -1,8 +1,15 @@
 package com.raulshma.minkoa.widget
 
+import android.appwidget.AppWidgetHostView
+import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProviderInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.drawable.Drawable
+import android.os.Build
+import android.widget.FrameLayout
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -65,8 +72,7 @@ fun WidgetPickerSheet(
             .map { (pkg, widgetList) ->
                 val appLabel = try {
                     packageManager.getApplicationLabel(
-                        packageManager.getApplicationInfo(pkg, PackageManager.GET_META_DATA
-                        )
+                        packageManager.getApplicationInfo(pkg, PackageManager.GET_META_DATA)
                     ).toString()
                 } catch (_: Exception) {
                     pkg
@@ -235,11 +241,15 @@ private fun WidgetPickerItem(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 64.dp, max = 160.dp)
+                    .heightIn(min = 64.dp, max = 200.dp)
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 contentAlignment = Alignment.Center
             ) {
-                WidgetPreview(widgetInfo = widgetInfo)
+                WidgetPreview(
+                    widgetInfo = widgetInfo,
+                    spanX = spanX,
+                    spanY = spanY
+                )
             }
 
             Row(
@@ -284,35 +294,18 @@ private fun WidgetPickerItem(
 @Composable
 private fun WidgetPreview(
     widgetInfo: AppWidgetProviderInfo,
+    spanX: Int,
+    spanY: Int,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val preview by produceState<ImageBitmap?>(null, widgetInfo.provider) {
-        value = withContext(Dispatchers.IO) {
-            val density = context.resources.displayMetrics.densityDpi
-            val drawable = runCatching {
-                widgetInfo.loadPreviewImage(context, density)
-            }.getOrNull() ?: runCatching {
-                widgetInfo.loadIcon(context, density)
-            }.getOrNull()
-
-            drawable?.let {
-                val intrinsicW = it.intrinsicWidth.takeIf { w -> w > 0 } ?: 200
-                val intrinsicH = it.intrinsicHeight.takeIf { h -> h > 0 } ?: 200
-                val maxDim = 512
-                val scale = if (maxOf(intrinsicW, intrinsicH) > maxDim) {
-                    maxDim.toFloat() / maxOf(intrinsicW, intrinsicH)
-                } else 1f
-                val w = (intrinsicW * scale).toInt().coerceAtLeast(1)
-                val h = (intrinsicH * scale).toInt().coerceAtLeast(1)
-                runCatching { it.toBitmap(w, h).asImageBitmap() }.getOrNull()
-            }
-        }
+    val previewBitmap by produceState<ImageBitmap?>(null, widgetInfo.provider) {
+        value = generateWidgetPreviewBitmap(context, widgetInfo, spanX, spanY)
     }
 
-    if (preview != null) {
+    if (previewBitmap != null) {
         Image(
-            bitmap = preview!!,
+            bitmap = previewBitmap!!,
             contentDescription = null,
             modifier = modifier.fillMaxWidth(),
             contentScale = ContentScale.Fit
@@ -329,4 +322,222 @@ private fun WidgetPreview(
             )
         }
     }
+}
+
+private suspend fun generateWidgetPreviewBitmap(
+    context: android.content.Context,
+    widgetInfo: AppWidgetProviderInfo,
+    spanX: Int,
+    spanY: Int
+): ImageBitmap? = withContext(Dispatchers.IO) {
+    val density = context.resources.displayMetrics.densityDpi
+
+    // 1. Try static preview image
+    val staticPreview = runCatching {
+        widgetInfo.loadPreviewImage(context, density)
+    }.getOrNull()
+
+    if (staticPreview != null) {
+        val intrinsicW = staticPreview.intrinsicWidth.takeIf { it > 0 } ?: 200
+        val intrinsicH = staticPreview.intrinsicHeight.takeIf { it > 0 } ?: 200
+        val maxDim = 600
+        val scale = if (maxOf(intrinsicW, intrinsicH) > maxDim) {
+            maxDim.toFloat() / maxOf(intrinsicW, intrinsicH)
+        } else 1f
+        val w = (intrinsicW * scale).toInt().coerceAtLeast(1)
+        val h = (intrinsicH * scale).toInt().coerceAtLeast(1)
+        return@withContext runCatching {
+            staticPreview.toBitmap(w, h).asImageBitmap()
+        }.getOrNull()
+    }
+
+    // 2. Try previewLayout (Android 12+) – clone info and swap initialLayout
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val previewLayout = widgetInfo.previewLayout
+        if (previewLayout != 0) {
+            val cloned = widgetInfo.clone() as AppWidgetProviderInfo
+            cloned.initialLayout = previewLayout
+            val rendered = renderPreviewHostView(context, cloned, null)
+            if (rendered != null) {
+                return@withContext rendered
+            }
+        }
+    }
+
+    // 3. Try generated preview via hidden API (Android 12+)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val generated = loadGeneratedPreview(context, widgetInfo)
+        if (generated != null) {
+            return@withContext generated
+        }
+    }
+
+    // 4. Fallback: draw a preview placeholder like Launcher3 does
+    generatePlaceholderPreview(context, widgetInfo, spanX, spanY)
+}
+
+private suspend fun loadGeneratedPreview(
+    context: android.content.Context,
+    widgetInfo: AppWidgetProviderInfo
+): ImageBitmap? = withContext(Dispatchers.Main.immediate) {
+    try {
+        val appWidgetManager = AppWidgetManager.getInstance(context)
+
+        // Use reflection to access hidden getAppWidgetPreview API
+        val remoteViews = try {
+            val method = AppWidgetManager::class.java.getDeclaredMethod(
+                "getAppWidgetPreview",
+                android.content.ComponentName::class.java,
+                Int::class.javaPrimitiveType
+            )
+            method.invoke(appWidgetManager, widgetInfo.provider, 0) as? android.widget.RemoteViews
+        } catch (_: Exception) {
+            // Try alternative method signature
+            try {
+                val method = AppWidgetManager::class.java.getDeclaredMethod(
+                    "getAppWidgetPreview",
+                    android.content.ComponentName::class.java
+                )
+                method.invoke(appWidgetManager, widgetInfo.provider) as? android.widget.RemoteViews
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        if (remoteViews == null) {
+            return@withContext null
+        }
+
+        renderPreviewHostView(context, widgetInfo, remoteViews)
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private suspend fun renderPreviewHostView(
+    context: android.content.Context,
+    providerInfo: AppWidgetProviderInfo,
+    remoteViews: android.widget.RemoteViews?
+): ImageBitmap? = withContext(Dispatchers.Main.immediate) {
+    try {
+        val providerContext = runCatching {
+            context.createPackageContext(
+                providerInfo.provider.packageName,
+                android.content.Context.CONTEXT_IGNORE_SECURITY
+            )
+        }.getOrDefault(context)
+        val hostView = AppWidgetHostView(providerContext)
+        hostView.setAppWidget(-1, providerInfo)
+
+        val width = providerInfo.minWidth.takeIf { it > 0 } ?: 200
+        val height = providerInfo.minHeight.takeIf { it > 0 } ?: 200
+        val maxDim = 600
+        val scale = if (maxOf(width, height) > maxDim) {
+            maxDim.toFloat() / maxOf(width, height)
+        } else 1f
+        val scaledW = (width * scale).toInt().coerceAtLeast(1)
+        val scaledH = (height * scale).toInt().coerceAtLeast(1)
+
+        // Add to a temporary FrameLayout for measuring
+        val container = FrameLayout(context).apply {
+            layoutParams = FrameLayout.LayoutParams(scaledW, scaledH)
+        }
+
+        if (remoteViews != null) {
+            hostView.updateAppWidget(remoteViews)
+        }
+        container.addView(hostView, FrameLayout.LayoutParams(scaledW, scaledH))
+
+        // Measure and layout
+        container.measure(
+            android.view.View.MeasureSpec.makeMeasureSpec(scaledW, android.view.View.MeasureSpec.EXACTLY),
+            android.view.View.MeasureSpec.makeMeasureSpec(scaledH, android.view.View.MeasureSpec.EXACTLY)
+        )
+        container.layout(0, 0, scaledW, scaledH)
+
+        // Give the view a chance to apply async updates
+        hostView.invalidate()
+
+        // Draw to bitmap
+        val bitmap = Bitmap.createBitmap(scaledW, scaledH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        container.draw(canvas)
+
+        bitmap.asImageBitmap()
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun generatePlaceholderPreview(
+    context: android.content.Context,
+    widgetInfo: AppWidgetProviderInfo,
+    spanX: Int,
+    spanY: Int
+): ImageBitmap? {
+    val density = context.resources.displayMetrics.density
+    val cellSizeDp = 70
+    val previewWidth = (spanX * cellSizeDp * density).toInt().coerceAtLeast(1)
+    val previewHeight = (spanY * cellSizeDp * density).toInt().coerceAtLeast(1)
+
+    // Scale down if too large
+    val maxDim = 600
+    val scale = if (maxOf(previewWidth, previewHeight) > maxDim) {
+        maxDim.toFloat() / maxOf(previewWidth, previewHeight)
+    } else 1f
+    val w = (previewWidth * scale).toInt().coerceAtLeast(1)
+    val h = (previewHeight * scale).toInt().coerceAtLeast(1)
+
+    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    // Draw background
+    val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE
+        style = Paint.Style.FILL
+    }
+    val cornerRadius = 16f * scale
+    canvas.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), cornerRadius, cornerRadius, bgPaint)
+
+    // Draw grid lines
+    val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.LTGRAY
+        strokeWidth = 1f * scale
+        style = Paint.Style.STROKE
+    }
+
+    // Vertical lines
+    val cellW = w.toFloat() / spanX
+    for (i in 1 until spanX) {
+        val x = i * cellW
+        canvas.drawLine(x, 0f, x, h.toFloat(), gridPaint)
+    }
+
+    // Horizontal lines
+    val cellH = h.toFloat() / spanY
+    for (i in 1 until spanY) {
+        val y = i * cellH
+        canvas.drawLine(0f, y, w.toFloat(), y, gridPaint)
+    }
+
+    // Draw app icon in center
+    try {
+        val appIcon = context.packageManager.getApplicationIcon(widgetInfo.provider.packageName)
+        val iconSize = (48 * density * scale).toInt().coerceAtLeast(24)
+        val iconBitmap = appIcon.toBitmap(iconSize, iconSize)
+        val left = (w - iconSize) / 2f
+        val top = (h - iconSize) / 2f
+        canvas.drawBitmap(iconBitmap, left, top, null)
+    } catch (_: Exception) {
+        // If no icon, draw a letter
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.DKGRAY
+            textSize = 32f * scale
+            textAlign = Paint.Align.CENTER
+        }
+        val label = widgetInfo.provider.shortClassName.firstOrNull()?.toString() ?: "?"
+        canvas.drawText(label, w / 2f, h / 2f + textPaint.textSize / 3f, textPaint)
+    }
+
+    return bitmap.asImageBitmap()
 }

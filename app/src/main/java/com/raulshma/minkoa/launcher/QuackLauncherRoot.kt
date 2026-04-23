@@ -18,6 +18,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -95,6 +97,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -129,6 +132,7 @@ import com.raulshma.minkoa.widget.LauncherWidgetHostController
 import com.raulshma.minkoa.widget.WidgetPickerSheet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -643,6 +647,24 @@ fun QuackLauncherRoot(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding)
+                .then(
+                    if (dragInProgress != null && isEditMode) {
+                        Modifier.pointerInput(dragInProgress != null) {
+                            awaitEachGesture {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    val change = event.changes.firstOrNull() ?: break
+                                    if (!change.pressed) {
+                                        finishDrag()
+                                        break
+                                    }
+                                    change.consume()
+                                    updateDrag(change.position)
+                                }
+                            }
+                        }
+                    } else Modifier
+                )
         ) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                 when {
@@ -659,7 +681,14 @@ fun QuackLauncherRoot(
                         onWorkspaceSlotTapped = { handleSlotTap(SlotArea.Workspace, it) },
                         onWorkspaceSlotBoundsChanged = { i, b -> workspaceBounds[i] = b },
                         onWorkspaceDragStart = { i, p -> contentAtSlot(SlotSelection(SlotArea.Workspace, i))?.let { beginDrag(SlotSelection(SlotArea.Workspace, i), it, p) } },
-                        onWorkspaceDragMove = ::updateDrag, onWorkspaceDragEnd = ::finishDrag, onWorkspaceDragCancel = ::cancelDrag
+                        onWorkspaceDragMove = ::updateDrag, onWorkspaceDragEnd = ::finishDrag, onWorkspaceDragCancel = ::cancelDrag,
+                        onWidgetLongPress = { index, pointerOffset ->
+                            isEditMode = true
+                            val content = contentAtSlot(SlotSelection(SlotArea.Workspace, index))
+                            if (content != null) {
+                                beginDrag(SlotSelection(SlotArea.Workspace, index), content, pointerOffset)
+                            }
+                        }
                     )
                     page < PAGER_ANCHOR_PAGE -> {
                         val offset = PAGER_ANCHOR_PAGE - page
@@ -829,7 +858,8 @@ private fun AnchorHomeScreen(
     onWorkspaceDragStart: (Int, Offset) -> Unit,
     onWorkspaceDragMove: (Offset) -> Unit,
     onWorkspaceDragEnd: () -> Unit,
-    onWorkspaceDragCancel: () -> Unit
+    onWorkspaceDragCancel: () -> Unit,
+    onWidgetLongPress: (Int, Offset) -> Unit
 ) {
     val context = LocalContext.current
     var cumulativeDrag by remember { mutableStateOf(0f) }
@@ -868,6 +898,7 @@ private fun AnchorHomeScreen(
             workspaceColumns, workspaceRows,
             onWorkspaceSlotTapped, onOpenHomeSettings, onWorkspaceSlotBoundsChanged,
             onWorkspaceDragStart, onWorkspaceDragMove, onWorkspaceDragEnd, onWorkspaceDragCancel,
+            onWidgetLongPress = onWidgetLongPress,
             modifier = Modifier.weight(1f).padding(top = 8.dp)
         )
     }
@@ -892,6 +923,7 @@ private fun WorkspaceCard(
     onWorkspaceSlotBoundsChanged: (Int, Rect) -> Unit,
     onWorkspaceDragStart: (Int, Offset) -> Unit, onWorkspaceDragMove: (Offset) -> Unit,
     onWorkspaceDragEnd: () -> Unit, onWorkspaceDragCancel: () -> Unit,
+    onWidgetLongPress: (Int, Offset) -> Unit,
     modifier: Modifier = Modifier
 ) {
     BoxWithConstraints(modifier = modifier) {
@@ -933,6 +965,7 @@ private fun WorkspaceCard(
                 onBoundsChanged = { onWorkspaceSlotBoundsChanged(index, it) },
                 onDragStart = { onWorkspaceDragStart(index, it) },
                 onDragMove = onWorkspaceDragMove, onDragEnd = onWorkspaceDragEnd, onDragCancel = onWorkspaceDragCancel,
+                onWidgetLongPress = { offset -> onWidgetLongPress(index, offset) },
                 modifier = Modifier
                     .offset(x = cellWidth * col, y = cellHeight * row)
                     .size(slotWidth, slotHeight)
@@ -953,6 +986,7 @@ private fun WorkspaceSlot(
     iconShape: IconShape,
     onTap: () -> Unit, onLongPressEmpty: () -> Unit, onBoundsChanged: (Rect) -> Unit,
     onDragStart: (Offset) -> Unit, onDragMove: (Offset) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit,
+    onWidgetLongPress: (Offset) -> Unit,
     modifier: Modifier = Modifier
 ) {
     if (isBlocked) {
@@ -1002,12 +1036,21 @@ private fun WorkspaceSlot(
                 color = bgColor
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    val providerInfo = remember(content.appWidgetId) { widgetHostController.getWidgetInfo(content.appWidgetId) }
+                    var providerInfo by remember(content.appWidgetId) {
+                        mutableStateOf(widgetHostController.getWidgetInfo(content.appWidgetId))
+                    }
+                    LaunchedEffect(content.appWidgetId) {
+                        while (providerInfo == null) {
+                            delay(300)
+                            providerInfo = widgetHostController.getWidgetInfo(content.appWidgetId)
+                        }
+                    }
                     if (providerInfo != null) {
+                        val info = providerInfo!!
                         AndroidView(factory = { ctx ->
                             FrameLayout(ctx).apply {
                                 layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-                                addView(widgetHostController.createHostView(content.appWidgetId, providerInfo).apply {
+                                addView(widgetHostController.createHostView(content.appWidgetId, info).apply {
                                     layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
                                 })
                             }
@@ -1051,8 +1094,34 @@ private fun WorkspaceSlot(
             }
         }
 
-        val needsOverlay = isEditMode || !isWidget
-        if (needsOverlay) {
+        if (isWidget && !isEditMode) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onGloballyPositioned { slotBounds = it.boundsInRoot(); onBoundsChanged(it.boundsInRoot()) }
+                    .pointerInput(content) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val upBeforeTimeout = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                                do {
+                                    val event = awaitPointerEvent()
+                                } while (event.changes.any { it.pressed })
+                            }
+                            if (upBeforeTimeout == null) {
+                                onWidgetLongPress((slotBounds?.topLeft ?: Offset.Zero) + down.position)
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull()
+                                    if (change == null || !change.pressed) {
+                                        onDragEnd()
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    }
+            )
+        } else if (isEditMode || !isWidget) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1077,12 +1146,6 @@ private fun WorkspaceSlot(
                             onDragCancel = { onDragCancel() }
                         )
                     }
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .onGloballyPositioned { slotBounds = it.boundsInRoot(); onBoundsChanged(it.boundsInRoot()) }
             )
         }
     }
