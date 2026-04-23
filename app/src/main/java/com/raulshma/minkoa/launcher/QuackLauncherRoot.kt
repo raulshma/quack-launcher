@@ -343,8 +343,8 @@ fun QuackLauncherRoot(
     var isScreenEditorOpen by rememberSaveable { mutableStateOf(false) }
     var isWidgetPickerOpen by rememberSaveable { mutableStateOf(false) }
     var pendingScreenSide by rememberSaveable { mutableStateOf(ScreenSide.Left.name) }
-    var workspaceSlots by remember { mutableStateOf(savedLayout?.workspaceSlots ?: List(WORKSPACE_SLOTS) { null }) }
-    var dockSlots by remember { mutableStateOf(savedLayout?.dockSlots ?: List(DOCK_APP_SLOTS) { null }) }
+    var workspaceSlots by remember { mutableStateOf(validateWidgetSlots(savedLayout?.workspaceSlots ?: List(WORKSPACE_SLOTS) { null }, widgetHostController)) }
+    var dockSlots by remember { mutableStateOf(validateWidgetSlots(savedLayout?.dockSlots ?: List(DOCK_APP_SLOTS) { null }, widgetHostController)) }
     var layoutInitialized by remember { mutableStateOf(savedLayout != null) }
     var selectedSlot by remember { mutableStateOf<SlotSelection?>(null) }
     val workspaceBounds = remember { mutableStateMapOf<Int, Rect>() }
@@ -488,7 +488,6 @@ fun QuackLauncherRoot(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.surface)
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding)
         ) {
@@ -679,7 +678,7 @@ private fun WorkspaceCard(
     onWorkspaceDragEnd: () -> Unit, onWorkspaceDragCancel: () -> Unit
 ) {
     ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.cardCornerRadius)) {
-        Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(text = "Home Workspace \u00b7 4 \u00d7 5", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             LazyVerticalGrid(
                 columns = GridCells.Fixed(WORKSPACE_COLUMNS),
@@ -1169,4 +1168,14 @@ private fun launchApp(context: Context, app: LauncherApp) {
         flags = Intent.FLAG_ACTIVITY_NEW_TASK
     }
     runCatching { context.startActivity(launchIntent) }.onFailure { Toast.makeText(context, "Unable to open ${app.label}", Toast.LENGTH_SHORT).show() }
+}
+
+private fun validateWidgetSlots(
+    slots: List<SlotContent?>,
+    widgetHostController: LauncherWidgetHostController
+): List<SlotContent?> {
+    return slots.map { slot ->
+        if (slot is SlotContent.Widget && !widgetHostController.isWidgetIdValid(slot.appWidgetId)) null
+        else slot
+    }
 }

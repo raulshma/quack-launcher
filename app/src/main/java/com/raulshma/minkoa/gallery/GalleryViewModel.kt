@@ -25,20 +25,24 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _uiState = MutableStateFlow(GalleryUiState())
     val uiState: StateFlow<GalleryUiState> = _uiState.asStateFlow()
 
+    private var observationActive = false
+
     fun loadImages() {
-        if (_uiState.value.isLoaded) return
+        if (observationActive) return
+        observationActive = true
         _uiState.update { it.copy(isLoading = true) }
 
-        viewModelScope.launch(Dispatchers.IO) {
-            val images = repository.queryImages()
-            val albums = repository.computeAlbums(images)
-            _uiState.update {
-                it.copy(
-                    images = images,
-                    albums = albums,
-                    isLoading = false,
-                    isLoaded = true
-                )
+        viewModelScope.launch {
+            repository.observeImages().collect { images ->
+                val albums = repository.computeAlbums(images)
+                _uiState.update {
+                    it.copy(
+                        images = images,
+                        albums = albums,
+                        isLoading = false,
+                        isLoaded = true
+                    )
+                }
             }
         }
     }

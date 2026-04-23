@@ -2,8 +2,16 @@ package com.raulshma.minkoa.gallery
 
 import android.content.ContentUris
 import android.content.Context
+import android.database.ContentObserver
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flowOn
 
 data class GalleryImage(
     val id: Long,
@@ -29,6 +37,23 @@ data class GalleryAlbum(
 )
 
 class GalleryRepository(private val context: Context) {
+
+    fun observeImages(): Flow<List<GalleryImage>> = callbackFlow {
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                trySend(queryImages())
+            }
+        }
+        context.contentResolver.registerContentObserver(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            true,
+            observer
+        )
+        trySend(queryImages())
+        awaitClose {
+            context.contentResolver.unregisterContentObserver(observer)
+        }
+    }.flowOn(Dispatchers.IO)
 
     fun queryImages(): List<GalleryImage> {
         val images = mutableListOf<GalleryImage>()

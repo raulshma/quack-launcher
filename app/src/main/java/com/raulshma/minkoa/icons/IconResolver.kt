@@ -4,18 +4,14 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
-import android.os.Build
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.core.graphics.drawable.toBitmap
 
 @Immutable
 data class ResolvedIcon(
@@ -33,6 +29,8 @@ class IconResolver(private val context: Context) {
     private val packageManager = context.packageManager
     private val cache = mutableMapOf<String, ResolvedIcon>()
     var activeIconPack: String? = null
+        private set
+    private var iconPackMapping: Map<String, String>? = null
 
     fun resolve(appKey: String): ResolvedIcon? {
         cache[appKey]?.let { return it }
@@ -62,36 +60,54 @@ class IconResolver(private val context: Context) {
     private fun loadIconForComponent(componentName: ComponentName, packageName: String): Drawable? {
         val iconPackPkg = activeIconPack
         if (iconPackPkg != null) {
-            val packIcon = loadIconPackDrawable(iconPackPkg, componentName.flattenToString())
-                ?: loadIconPackDrawable(iconPackPkg, packageName)
-            if (packIcon != null) return packIcon
+            val mapping = getOrParseIconPackMapping(iconPackPkg)
+            val flatComponent = componentName.flattenToString()
+            val drawableName = mapping[flatComponent]
+                ?: mapping.entries.firstOrNull { it.key.contains(packageName) }?.value
+            if (drawableName != null) {
+                val icon = loadIconPackDrawableByName(iconPackPkg, drawableName)
+                if (icon != null) return icon
+            }
         }
         val activityInfo = packageManager.getActivityInfo(componentName, 0)
         return activityInfo.loadIcon(packageManager)
     }
 
-    private fun loadIconPackDrawable(iconPackPkg: String, componentNameStr: String): Drawable? {
+    private fun getOrParseIconPackMapping(iconPackPkg: String): Map<String, String> {
+        iconPackMapping?.let { return it }
+        val mapping = parseAppFilter(iconPackPkg)
+        iconPackMapping = mapping
+        return mapping
+    }
+
+    private fun parseAppFilter(iconPackPkg: String): Map<String, String> {
+        val mapping = mutableMapOf<String, String>()
         return try {
             val resources = packageManager.getResourcesForApplication(iconPackPkg)
             val appFilterId = resources.getIdentifier("appfilter", "xml", iconPackPkg)
-            if (appFilterId == 0) return null
+            if (appFilterId == 0) return mapping
 
             val xml = resources.getXml(appFilterId)
             while (xml.next() != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
                 if (xml.name == "item") {
                     val comp = xml.getAttributeValue(null, "component")
-                    if (comp != null && comp.contains(componentNameStr)) {
-                        val drawableName = xml.getAttributeValue(null, "drawable")
-                        if (drawableName != null) {
-                            val drawableId = resources.getIdentifier(drawableName, "drawable", iconPackPkg)
-                            if (drawableId != 0) {
-                                return packageManager.getDrawable(iconPackPkg, drawableId, null)
-                            }
-                        }
+                    val drawableName = xml.getAttributeValue(null, "drawable")
+                    if (comp != null && drawableName != null) {
+                        mapping[comp] = drawableName
                     }
                 }
             }
-            null
+            mapping
+        } catch (_: Exception) {
+            mapping
+        }
+    }
+
+    private fun loadIconPackDrawableByName(iconPackPkg: String, drawableName: String): Drawable? {
+        return try {
+            val resources = packageManager.getResourcesForApplication(iconPackPkg)
+            val drawableId = resources.getIdentifier(drawableName, "drawable", iconPackPkg)
+            if (drawableId != 0) packageManager.getDrawable(iconPackPkg, drawableId, null) else null
         } catch (_: Exception) {
             null
         }
@@ -112,6 +128,7 @@ class IconResolver(private val context: Context) {
 
     fun setIconPack(packageName: String?) {
         activeIconPack = packageName
+        iconPackMapping = null
         cache.clear()
     }
 

@@ -23,6 +23,19 @@ class LauncherWidgetHostController(
         runCatching { appWidgetHost.startListening() }
     }
 
+    fun isWidgetIdValid(appWidgetId: Int): Boolean {
+        return runCatching { appWidgetManager.getAppWidgetInfo(appWidgetId) != null }.getOrDefault(false)
+    }
+
+    fun cleanupStaleWidgetIds(persistedIds: List<Int>): List<Int> {
+        val validIds = appWidgetHost.appWidgetIds.toSet()
+        val staleIds = persistedIds.filter { it !in validIds || !isWidgetIdValid(it) }
+        staleIds.forEach { id ->
+            runCatching { appWidgetHost.deleteAppWidgetId(id) }
+        }
+        return persistedIds.filter { it in validIds && isWidgetIdValid(it) }
+    }
+
     fun stopListening() {
         runCatching { appWidgetHost.stopListening() }
     }
