@@ -63,8 +63,34 @@ class AppPreferencesRepository(context: Context) {
         prefs.edit().putString(KEY_CUSTOM_LABELS, json.toString()).apply()
     }
 
+    fun getIconBackground(): IconBackground {
+        return try {
+            IconBackground.valueOf(prefs.getString(KEY_ICON_BACKGROUND, IconBackground.Default.name)!!)
+        } catch (_: Exception) {
+            IconBackground.Default
+        }
+    }
+
+    fun setIconBackground(background: IconBackground) {
+        prefs.edit().putString(KEY_ICON_BACKGROUND, background.name).apply()
+    }
+
+    fun getIconShape(): IconShape {
+        return try {
+            IconShape.valueOf(prefs.getString(KEY_ICON_SHAPE, IconShape.Rounded.name)!!)
+        } catch (_: Exception) {
+            IconShape.Rounded
+        }
+    }
+
+    fun setIconShape(shape: IconShape) {
+        prefs.edit().putString(KEY_ICON_SHAPE, shape.name).apply()
+    }
+
     companion object {
         private const val KEY_HIDDEN_APPS = "hidden_apps"
         private const val KEY_CUSTOM_LABELS = "custom_labels"
+        private const val KEY_ICON_BACKGROUND = "icon_background"
+        private const val KEY_ICON_SHAPE = "icon_shape"
     }
 }
