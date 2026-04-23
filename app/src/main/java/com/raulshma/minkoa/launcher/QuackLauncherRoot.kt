@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -30,6 +31,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -80,6 +82,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -99,6 +102,11 @@ import com.raulshma.minkoa.data.SavedLayout
 import com.raulshma.minkoa.data.SlotContent
 import com.raulshma.minkoa.files.FilesScreen
 import com.raulshma.minkoa.gallery.GalleryScreen
+import com.raulshma.minkoa.icons.IconResolver
+import com.raulshma.minkoa.icons.ResolvedIcon
+import com.raulshma.minkoa.notifications.LauncherNotificationListener
+import com.raulshma.minkoa.ui.theme.LocalMotionTokens
+import com.raulshma.minkoa.ui.theme.LocalShapeTokens
 import com.raulshma.minkoa.weather.WeatherScreen
 import com.raulshma.minkoa.widget.LauncherWidgetHostController
 import com.raulshma.minkoa.widget.WidgetPickerSheet
@@ -124,19 +132,12 @@ private const val SWIPE_UP_THRESHOLD = -120f
 private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val dateFormatter = DateTimeFormatter.ofPattern("EEE, MMM d", Locale.getDefault())
 
-private enum class SlotArea {
-    Workspace,
-    Dock
-}
+private enum class SlotArea { Workspace, Dock }
 
 private enum class ScreenSide {
-    Left,
-    Right;
-
+    Left, Right;
     companion object {
-        fun fromName(name: String): ScreenSide = entries.firstOrNull { side ->
-            side.name == name
-        } ?: Left
+        fun fromName(name: String): ScreenSide = entries.firstOrNull { it.name == name } ?: Left
     }
 }
 
@@ -145,32 +146,16 @@ private enum class ExtensionScreenType(
     val title: String,
     val summary: String
 ) {
-    Gallery(
-        id = "gallery",
-        title = "Gallery",
-        summary = "Recent photos in a focused, fast visual grid."
-    ),
-    Files(
-        id = "files",
-        title = "Files",
-        summary = "Quick access to documents, downloads, and recent files."
-    ),
-    Weather(
-        id = "weather",
-        title = "Weather",
-        summary = "Immersive at-a-glance temperature and forecast surface."
-    );
+    Gallery("gallery", "Gallery", "Recent photos in a focused, fast visual grid."),
+    Files("files", "Files", "Quick access to documents, downloads, and recent files."),
+    Weather("weather", "Weather", "Immersive at-a-glance temperature and forecast surface.");
 
     companion object {
-        fun fromId(id: String): ExtensionScreenType? =
-            entries.firstOrNull { type -> type.id == id }
+        fun fromId(id: String): ExtensionScreenType? = entries.firstOrNull { it.id == id }
     }
 }
 
-private data class SlotSelection(
-    val area: SlotArea,
-    val index: Int
-)
+private data class SlotSelection(val area: SlotArea, val index: Int)
 
 private data class DragInProgress(
     val source: SlotSelection,
@@ -188,7 +173,8 @@ data class LauncherApp(
 data class LauncherUiState(
     val installedApps: List<LauncherApp> = emptyList(),
     val searchQuery: String = "",
-    val isLoading: Boolean = true
+    val isLoading: Boolean = true,
+    val icons: Map<String, ResolvedIcon> = emptyMap()
 )
 
 class LauncherViewModel(application: android.app.Application) :
@@ -196,22 +182,28 @@ class LauncherViewModel(application: android.app.Application) :
 
     private val _uiState = MutableStateFlow(LauncherUiState())
     val uiState: StateFlow<LauncherUiState> = _uiState.asStateFlow()
+    private val iconResolver = IconResolver(application)
 
-    init {
-        refreshApps()
-    }
+    init { refreshApps() }
 
     fun onSearchQueryChanged(query: String) {
-        _uiState.update { state -> state.copy(searchQuery = query) }
+        _uiState.update { it.copy(searchQuery = query) }
     }
 
     fun refreshApps() {
         viewModelScope.launch(Dispatchers.IO) {
             val apps = queryLaunchableApps(getApplication())
+            val keys = apps.map(::appKey)
+            iconResolver.preloadIcons(keys)
             _uiState.update { state ->
                 state.copy(
                     installedApps = apps,
-                    isLoading = false
+                    isLoading = false,
+                    icons = buildMap {
+                        keys.forEach { key ->
+                            iconResolver.resolve(key)?.let { put(key, it) }
+                        }
+                    }
                 )
             }
         }
@@ -222,28 +214,19 @@ class LauncherViewModel(application: android.app.Application) :
         val launcherIntent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
         }
-
         return packageManager
             .queryIntentActivities(launcherIntent, PackageManager.MATCH_ALL)
             .asSequence()
             .mapNotNull { resolveInfo ->
                 val activityInfo = resolveInfo.activityInfo ?: return@mapNotNull null
-                if (activityInfo.packageName == application.packageName) {
-                    return@mapNotNull null
-                }
-
+                if (activityInfo.packageName == application.packageName) return@mapNotNull null
                 val label = resolveInfo.loadLabel(packageManager)?.toString()
                     ?.takeIf { it.isNotBlank() }
                     ?: activityInfo.name.substringAfterLast('.')
-
-                LauncherApp(
-                    label = label,
-                    packageName = activityInfo.packageName,
-                    activityName = activityInfo.name
-                )
+                LauncherApp(label, activityInfo.packageName, activityInfo.name)
             }
-            .distinctBy { app -> appKey(app) }
-            .sortedBy { app -> app.label.lowercase(Locale.getDefault()) }
+            .distinctBy { appKey(it) }
+            .sortedBy { it.label.lowercase(Locale.getDefault()) }
             .toList()
     }
 }
@@ -261,131 +244,77 @@ fun QuackLauncherRoot(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val pagerState = rememberPagerState(
-        initialPage = PAGER_ANCHOR_PAGE,
-        pageCount = { Int.MAX_VALUE }
-    )
+    val pagerState = rememberPagerState(initialPage = PAGER_ANCHOR_PAGE, pageCount = { Int.MAX_VALUE })
     val pagerScope = rememberCoroutineScope()
     val appDrawerState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-
     val layoutRepository = remember { LayoutRepository(context) }
     val savedLayout = remember { layoutRepository.loadLayout() }
+    val notificationCounts by LauncherNotificationListener.notificationCounts.collectAsStateWithLifecycle()
 
     var isAppDrawerOpen by rememberSaveable { mutableStateOf(false) }
     var isEditMode by rememberSaveable { mutableStateOf(false) }
     var isScreenEditorOpen by rememberSaveable { mutableStateOf(false) }
     var isWidgetPickerOpen by rememberSaveable { mutableStateOf(false) }
     var pendingScreenSide by rememberSaveable { mutableStateOf(ScreenSide.Left.name) }
-
-    var workspaceSlots by remember {
-        mutableStateOf(
-            savedLayout?.workspaceSlots ?: List(WORKSPACE_SLOTS) { null }
-        )
-    }
-    var dockSlots by remember {
-        mutableStateOf(
-            savedLayout?.dockSlots ?: List(DOCK_APP_SLOTS) { null }
-        )
-    }
+    var workspaceSlots by remember { mutableStateOf(savedLayout?.workspaceSlots ?: List(WORKSPACE_SLOTS) { null }) }
+    var dockSlots by remember { mutableStateOf(savedLayout?.dockSlots ?: List(DOCK_APP_SLOTS) { null }) }
     var layoutInitialized by remember { mutableStateOf(savedLayout != null) }
-
     var selectedSlot by remember { mutableStateOf<SlotSelection?>(null) }
     val workspaceBounds = remember { mutableStateMapOf<Int, Rect>() }
     val dockBounds = remember { mutableStateMapOf<Int, Rect>() }
     var dragInProgress by remember { mutableStateOf<DragInProgress?>(null) }
     var dragHoverTarget by remember { mutableStateOf<SlotSelection?>(null) }
-
-    var leftScreenIds by rememberSaveable {
-        mutableStateOf(savedLayout?.leftScreenIds ?: emptyList())
-    }
-    var rightScreenIds by rememberSaveable {
-        mutableStateOf(savedLayout?.rightScreenIds ?: emptyList())
-    }
-
-    val leftScreens = remember(leftScreenIds) {
-        leftScreenIds.mapNotNull(ExtensionScreenType::fromId)
-    }
-    val rightScreens = remember(rightScreenIds) {
-        rightScreenIds.mapNotNull(ExtensionScreenType::fromId)
-    }
-
+    var leftScreenIds by rememberSaveable { mutableStateOf(savedLayout?.leftScreenIds ?: emptyList()) }
+    var rightScreenIds by rememberSaveable { mutableStateOf(savedLayout?.rightScreenIds ?: emptyList()) }
+    val leftScreens = remember(leftScreenIds) { leftScreenIds.mapNotNull(ExtensionScreenType::fromId) }
+    val rightScreens = remember(rightScreenIds) { rightScreenIds.mapNotNull(ExtensionScreenType::fromId) }
     val availableWidgets = remember { widgetHostController.installedProviders() }
+
+    val appsByKey = remember(uiState.installedApps) { uiState.installedApps.associateBy(::appKey) }
+    val iconsByKey = remember(uiState.icons) { uiState.icons }
 
     LaunchedEffect(uiState.installedApps, layoutInitialized) {
         if (!layoutInitialized && uiState.installedApps.isNotEmpty()) {
             val installedKeys = uiState.installedApps.map(::appKey)
-            workspaceSlots = List(WORKSPACE_SLOTS) { index ->
-                installedKeys.getOrNull(index)?.let { SlotContent.App(it) }
-            }
-            dockSlots = List(DOCK_APP_SLOTS) { index ->
-                installedKeys.getOrNull(index)?.let { SlotContent.App(it) }
-            }
+            workspaceSlots = List(WORKSPACE_SLOTS) { index -> installedKeys.getOrNull(index)?.let { SlotContent.App(it) } }
+            dockSlots = List(DOCK_APP_SLOTS) { index -> installedKeys.getOrNull(index)?.let { SlotContent.App(it) } }
             layoutInitialized = true
         }
     }
 
-    val appsByKey = remember(uiState.installedApps) {
-        uiState.installedApps.associateBy(::appKey)
-    }
-
-    val isAnchorPage by remember {
-        derivedStateOf { pagerState.currentPage == PAGER_ANCHOR_PAGE }
-    }
-
+    val isAnchorPage by remember { derivedStateOf { pagerState.currentPage == PAGER_ANCHOR_PAGE } }
     val dockAlpha by animateFloatAsState(
         targetValue = if (isAnchorPage) 1f else 0f,
         animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = LocalMotionTokens.current.springStiffness
         ),
         label = "dock-fade"
     )
 
     val filteredApps by remember(uiState.installedApps, uiState.searchQuery) {
         derivedStateOf {
-            val trimmedQuery = uiState.searchQuery.trim()
-            if (trimmedQuery.isBlank()) {
-                uiState.installedApps
-            } else {
-                uiState.installedApps.filter { app ->
-                    app.label.contains(trimmedQuery, ignoreCase = true) ||
-                        app.packageName.contains(trimmedQuery, ignoreCase = true)
-                }
-            }
+            val q = uiState.searchQuery.trim()
+            if (q.isBlank()) uiState.installedApps
+            else uiState.installedApps.filter { it.label.contains(q, true) || it.packageName.contains(q, true) }
         }
     }
 
     fun persistLayout() {
-        layoutRepository.saveLayout(
-            workspaceSlots = workspaceSlots,
-            dockSlots = dockSlots,
-            leftScreenIds = leftScreenIds,
-            rightScreenIds = rightScreenIds
-        )
+        layoutRepository.saveLayout(workspaceSlots, dockSlots, leftScreenIds, rightScreenIds)
     }
 
     fun assignSlot(selection: SlotSelection, content: SlotContent?) {
         when (selection.area) {
-            SlotArea.Workspace -> {
-                workspaceSlots = workspaceSlots.toMutableList().apply {
-                    this[selection.index] = content
-                }
-            }
-
-            SlotArea.Dock -> {
-                dockSlots = dockSlots.toMutableList().apply {
-                    this[selection.index] = content
-                }
-            }
+            SlotArea.Workspace -> workspaceSlots = workspaceSlots.toMutableList().apply { this[selection.index] = content }
+            SlotArea.Dock -> dockSlots = dockSlots.toMutableList().apply { this[selection.index] = content }
         }
         persistLayout()
     }
 
-    fun contentAtSlot(selection: SlotSelection): SlotContent? {
-        return when (selection.area) {
-            SlotArea.Workspace -> workspaceSlots.getOrNull(selection.index)
-            SlotArea.Dock -> dockSlots.getOrNull(selection.index)
-        }
+    fun contentAtSlot(selection: SlotSelection): SlotContent? = when (selection.area) {
+        SlotArea.Workspace -> workspaceSlots.getOrNull(selection.index)
+        SlotArea.Dock -> dockSlots.getOrNull(selection.index)
     }
 
     fun swapSlots(from: SlotSelection, to: SlotSelection) {
@@ -396,99 +325,54 @@ fun QuackLauncherRoot(
     }
 
     fun findDropTarget(pointerInRoot: Offset): SlotSelection? {
-        workspaceBounds.entries.firstOrNull { (_, rect) ->
-            rect.contains(pointerInRoot)
-        }?.let { (index, _) ->
-            return SlotSelection(SlotArea.Workspace, index)
-        }
-
-        dockBounds.entries.firstOrNull { (_, rect) ->
-            rect.contains(pointerInRoot)
-        }?.let { (index, _) ->
-            return SlotSelection(SlotArea.Dock, index)
-        }
-
+        workspaceBounds.entries.firstOrNull { (_, rect) -> rect.contains(pointerInRoot) }?.let { return SlotSelection(SlotArea.Workspace, it.key) }
+        dockBounds.entries.firstOrNull { (_, rect) -> rect.contains(pointerInRoot) }?.let { return SlotSelection(SlotArea.Dock, it.key) }
         return null
     }
 
     fun beginDrag(source: SlotSelection, content: SlotContent, pointerInRoot: Offset) {
         if (!isEditMode) return
-
         val label = when (content) {
             is SlotContent.App -> appsByKey[content.key]?.label ?: "App"
             is SlotContent.Widget -> "Widget"
         }
-        dragInProgress = DragInProgress(
-            source = source,
-            label = label,
-            pointerInRoot = pointerInRoot
-        )
+        dragInProgress = DragInProgress(source, label, pointerInRoot)
         dragHoverTarget = source
         selectedSlot = null
     }
 
     fun updateDrag(pointerInRoot: Offset) {
-        val current = dragInProgress ?: return
-        dragInProgress = current.copy(pointerInRoot = pointerInRoot)
+        dragInProgress?.let { dragInProgress = it.copy(pointerInRoot = pointerInRoot) }
         dragHoverTarget = findDropTarget(pointerInRoot)
     }
 
     fun finishDrag() {
         val drag = dragInProgress
         val target = dragHoverTarget
-
         if (drag != null && target != null && target != drag.source) {
             val sourceValue = contentAtSlot(drag.source)
             val targetValue = contentAtSlot(target)
             assignSlot(target, sourceValue)
             assignSlot(drag.source, targetValue)
         }
-
         dragInProgress = null
         dragHoverTarget = null
     }
 
-    fun cancelDrag() {
-        dragInProgress = null
-        dragHoverTarget = null
-    }
+    fun cancelDrag() { dragInProgress = null; dragHoverTarget = null }
 
     fun handleSlotTap(area: SlotArea, index: Int) {
         if (dragInProgress != null) return
-
         val tapped = SlotSelection(area, index)
         val tappedContent = contentAtSlot(tapped)
-
         if (!isEditMode) {
-            when (tappedContent) {
-                is SlotContent.App -> {
-                    appsByKey[tappedContent.key]?.let { app ->
-                        launchApp(context, app)
-                    }
-                }
-
-                is SlotContent.Widget -> { /* no-op on tap for widgets */ }
-                null -> { /* empty slot */ }
-            }
+            if (tappedContent is SlotContent.App) appsByKey[tappedContent.key]?.let { launchApp(context, it) }
             return
         }
-
-        val currentSelection = selectedSlot
         when {
-            currentSelection == null -> {
-                if (tappedContent != null) {
-                    selectedSlot = tapped
-                }
-            }
-
-            currentSelection == tapped -> {
-                selectedSlot = null
-            }
-
-            else -> {
-                swapSlots(currentSelection, tapped)
-                selectedSlot = null
-            }
+            selectedSlot == null -> { if (tappedContent != null) selectedSlot = tapped }
+            selectedSlot == tapped -> { selectedSlot = null }
+            else -> { swapSlots(selectedSlot!!, tapped); selectedSlot = null }
         }
     }
 
@@ -498,19 +382,11 @@ fun QuackLauncherRoot(
         requestWidgetBind(appWidgetId, provider) { widgetSlot ->
             if (widgetSlot != null) {
                 val target = selectedSlot
-                if (target != null) {
-                    assignSlot(target, widgetSlot)
-                    selectedSlot = null
-                } else {
+                if (target != null) { assignSlot(target, widgetSlot); selectedSlot = null }
+                else {
                     val firstEmpty = workspaceSlots.indexOfFirst { it == null }
-                    if (firstEmpty >= 0) {
-                        workspaceSlots = workspaceSlots.toMutableList().apply {
-                            this[firstEmpty] = widgetSlot
-                        }
-                        persistLayout()
-                    } else {
-                        widgetHostController.deleteAppWidgetId(appWidgetId)
-                    }
+                    if (firstEmpty >= 0) { workspaceSlots = workspaceSlots.toMutableList().apply { this[firstEmpty] = widgetSlot }; persistLayout() }
+                    else widgetHostController.deleteAppWidgetId(appWidgetId)
                 }
             }
             isWidgetPickerOpen = false
@@ -525,238 +401,98 @@ fun QuackLauncherRoot(
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding)
         ) {
-            HorizontalPager(
-                state = pagerState,
-                modifier = Modifier.fillMaxSize()
-            ) { page ->
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                 when {
-                    page == PAGER_ANCHOR_PAGE -> {
-                        AnchorHomeScreen(
-                            workspaceSlots = workspaceSlots,
-                            appsByKey = appsByKey,
-                            widgetHostController = widgetHostController,
-                            isEditMode = isEditMode,
-                            selectedSlot = selectedSlot,
-                            dragHoverTarget = dragHoverTarget,
-                            dragSource = dragInProgress?.source,
-                            onOpenDrawer = { isAppDrawerOpen = true },
-                            onEnterEditMode = {
-                                isEditMode = true
-                                selectedSlot = null
-                            },
-                            onWorkspaceSlotTapped = { index ->
-                                handleSlotTap(SlotArea.Workspace, index)
-                            },
-                            onWorkspaceSlotBoundsChanged = { index, bounds ->
-                                workspaceBounds[index] = bounds
-                            },
-                            onWorkspaceDragStart = { index, pointerInRoot ->
-                                val slot = SlotSelection(SlotArea.Workspace, index)
-                                val content = contentAtSlot(slot)
-                                if (content != null) {
-                                    beginDrag(slot, content, pointerInRoot)
-                                }
-                            },
-                            onWorkspaceDragMove = ::updateDrag,
-                            onWorkspaceDragEnd = ::finishDrag,
-                            onWorkspaceDragCancel = ::cancelDrag
-                        )
-                    }
-
+                    page == PAGER_ANCHOR_PAGE -> AnchorHomeScreen(
+                        workspaceSlots, appsByKey, iconsByKey, notificationCounts, widgetHostController,
+                        isEditMode, selectedSlot, dragHoverTarget, dragInProgress?.source,
+                        onOpenDrawer = { isAppDrawerOpen = true },
+                        onEnterEditMode = { isEditMode = true; selectedSlot = null },
+                        onWorkspaceSlotTapped = { handleSlotTap(SlotArea.Workspace, it) },
+                        onWorkspaceSlotBoundsChanged = { i, b -> workspaceBounds[i] = b },
+                        onWorkspaceDragStart = { i, p -> contentAtSlot(SlotSelection(SlotArea.Workspace, i))?.let { beginDrag(SlotSelection(SlotArea.Workspace, i), it, p) } },
+                        onWorkspaceDragMove = ::updateDrag, onWorkspaceDragEnd = ::finishDrag, onWorkspaceDragCancel = ::cancelDrag
+                    )
                     page < PAGER_ANCHOR_PAGE -> {
                         val offset = PAGER_ANCHOR_PAGE - page
                         val screenType = leftScreens.getOrNull(offset - 1)
-                        if (screenType == null) {
-                            UnassignedExtensionPage(
-                                direction = "Left",
-                                index = offset,
-                                isEditMode = isEditMode,
-                                onAddScreen = {
-                                    pendingScreenSide = ScreenSide.Left.name
-                                    isScreenEditorOpen = true
-                                },
-                                onGoHome = {
-                                    pagerScope.launch {
-                                        pagerState.animateScrollToPage(PAGER_ANCHOR_PAGE)
-                                    }
-                                }
-                            )
-                        } else {
-                            when (screenType) {
-                                ExtensionScreenType.Gallery -> GalleryScreen()
-                                ExtensionScreenType.Weather -> WeatherScreen()
-                                ExtensionScreenType.Files -> FilesScreen()
-                            }
-                        }
+                        if (screenType == null) UnassignedExtensionPage("Left", offset, isEditMode, { pendingScreenSide = ScreenSide.Left.name; isScreenEditorOpen = true }) { pagerScope.launch { pagerState.animateScrollToPage(PAGER_ANCHOR_PAGE) } }
+                        else when (screenType) { ExtensionScreenType.Gallery -> GalleryScreen(); ExtensionScreenType.Weather -> WeatherScreen(); ExtensionScreenType.Files -> FilesScreen() }
                     }
-
                     else -> {
                         val offset = page - PAGER_ANCHOR_PAGE
                         val screenType = rightScreens.getOrNull(offset - 1)
-                        if (screenType == null) {
-                            UnassignedExtensionPage(
-                                direction = "Right",
-                                index = offset,
-                                isEditMode = isEditMode,
-                                onAddScreen = {
-                                    pendingScreenSide = ScreenSide.Right.name
-                                    isScreenEditorOpen = true
-                                },
-                                onGoHome = {
-                                    pagerScope.launch {
-                                        pagerState.animateScrollToPage(PAGER_ANCHOR_PAGE)
-                                    }
-                                }
-                            )
-                        } else {
-                            when (screenType) {
-                                ExtensionScreenType.Gallery -> GalleryScreen()
-                                ExtensionScreenType.Weather -> WeatherScreen()
-                                ExtensionScreenType.Files -> FilesScreen()
-                            }
-                        }
+                        if (screenType == null) UnassignedExtensionPage("Right", offset, isEditMode, { pendingScreenSide = ScreenSide.Right.name; isScreenEditorOpen = true }) { pagerScope.launch { pagerState.animateScrollToPage(PAGER_ANCHOR_PAGE) } }
+                        else when (screenType) { ExtensionScreenType.Gallery -> GalleryScreen(); ExtensionScreenType.Weather -> WeatherScreen(); ExtensionScreenType.Files -> FilesScreen() }
                     }
                 }
             }
 
             GlobalDock(
-                slotContents = dockSlots,
-                appsByKey = appsByKey,
-                widgetHostController = widgetHostController,
-                isEditMode = isEditMode,
-                selectedSlot = selectedSlot,
-                dragHoverTarget = dragHoverTarget,
-                dragSource = dragInProgress?.source,
-                onDockSlotTapped = { index ->
-                    handleSlotTap(SlotArea.Dock, index)
-                },
-                onDockSlotBoundsChanged = { index, bounds ->
-                    dockBounds[index] = bounds
-                },
-                onDockDragStart = { index, pointerInRoot ->
-                    val slot = SlotSelection(SlotArea.Dock, index)
-                    val content = contentAtSlot(slot)
-                    if (content != null) {
-                        beginDrag(slot, content, pointerInRoot)
-                    }
-                },
-                onDockDragMove = ::updateDrag,
-                onDockDragEnd = ::finishDrag,
-                onDockDragCancel = ::cancelDrag,
+                dockSlots, appsByKey, iconsByKey, notificationCounts, widgetHostController,
+                isEditMode, selectedSlot, dragHoverTarget, dragInProgress?.source,
+                onDockSlotTapped = { handleSlotTap(SlotArea.Dock, it) },
+                onDockSlotBoundsChanged = { i, b -> dockBounds[i] = b },
+                onDockDragStart = { i, p -> contentAtSlot(SlotSelection(SlotArea.Dock, i))?.let { beginDrag(SlotSelection(SlotArea.Dock, i), it, p) } },
+                onDockDragMove = ::updateDrag, onDockDragEnd = ::finishDrag, onDockDragCancel = ::cancelDrag,
                 onOpenDrawer = { isAppDrawerOpen = true },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .safeDrawingPadding()
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-                    .alpha(dockAlpha)
+                modifier = Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(horizontal = 16.dp, vertical = 12.dp).alpha(dockAlpha)
             )
 
             if (isEditMode && isAnchorPage) {
                 dragInProgress?.let { drag ->
-                    DraggedAppPreview(
-                        label = drag.label,
-                        modifier = Modifier
-                            .offset {
-                                IntOffset(
-                                    x = (drag.pointerInRoot.x - 26f).roundToInt(),
-                                    y = (drag.pointerInRoot.y - 26f).roundToInt()
-                                )
-                            }
-                    )
+                    DraggedAppPreview(label = drag.label, modifier = Modifier.offset { IntOffset((drag.pointerInRoot.x - 26f).roundToInt(), (drag.pointerInRoot.y - 26f).roundToInt()) })
                 }
                 EditModeOverlay(
-                    leftCount = leftScreens.size,
-                    rightCount = rightScreens.size,
-                    onAddLeft = {
-                        pendingScreenSide = ScreenSide.Left.name
-                        isScreenEditorOpen = true
-                    },
-                    onAddRight = {
-                        pendingScreenSide = ScreenSide.Right.name
-                        isScreenEditorOpen = true
-                    },
-                    onWidgets = {
-                        isWidgetPickerOpen = true
-                    },
-                    onDone = {
-                        isEditMode = false
-                        selectedSlot = null
-                    },
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .safeDrawingPadding()
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                    leftScreens.size, rightScreens.size,
+                    onAddLeft = { pendingScreenSide = ScreenSide.Left.name; isScreenEditorOpen = true },
+                    onAddRight = { pendingScreenSide = ScreenSide.Right.name; isScreenEditorOpen = true },
+                    onWidgets = { isWidgetPickerOpen = true },
+                    onDone = { isEditMode = false; selectedSlot = null },
+                    modifier = Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(horizontal = 12.dp, vertical = 8.dp)
                 )
             }
         }
     }
 
     if (isAppDrawerOpen) {
-        ModalBottomSheet(
-            onDismissRequest = { isAppDrawerOpen = false },
-            sheetState = appDrawerState
-        ) {
-            AppDrawerSheet(
-                isLoading = uiState.isLoading,
-                apps = filteredApps,
-                searchQuery = uiState.searchQuery,
-                onSearchQueryChanged = viewModel::onSearchQueryChanged,
-                onAppClicked = { app ->
-                    val selected = selectedSlot
-                    if (isEditMode) {
-                        if (selected != null) {
-                            assignSlot(selected, SlotContent.App(appKey(app)))
-                            selectedSlot = null
-                        } else {
-                            val firstEmpty = workspaceSlots.indexOfFirst { it == null }
-                            if (firstEmpty >= 0) {
-                                workspaceSlots = workspaceSlots.toMutableList().apply {
-                                    this[firstEmpty] = SlotContent.App(appKey(app))
-                                }
-                                persistLayout()
-                            } else {
-                                launchApp(context, app)
-                            }
-                        }
-                    } else {
-                        launchApp(context, app)
+        ModalBottomSheet(onDismissRequest = { isAppDrawerOpen = false }, sheetState = appDrawerState) {
+            AppDrawerSheet(uiState.isLoading, filteredApps, iconsByKey, notificationCounts, uiState.searchQuery, viewModel::onSearchQueryChanged) { app ->
+                val selected = selectedSlot
+                if (isEditMode) {
+                    if (selected != null) { assignSlot(selected, SlotContent.App(appKey(app))); selectedSlot = null }
+                    else {
+                        val firstEmpty = workspaceSlots.indexOfFirst { it == null }
+                        if (firstEmpty >= 0) { workspaceSlots = workspaceSlots.toMutableList().apply { this[firstEmpty] = SlotContent.App(appKey(app)) }; persistLayout() }
+                        else launchApp(context, app)
                     }
-                    isAppDrawerOpen = false
-                }
-            )
+                } else launchApp(context, app)
+                isAppDrawerOpen = false
+            }
         }
     }
 
     if (isScreenEditorOpen) {
-        ScreenEditorSheet(
-            initialSide = ScreenSide.fromName(pendingScreenSide),
-            onDismissRequest = { isScreenEditorOpen = false },
-            onConfirm = { side, type ->
-                when (side) {
-                    ScreenSide.Left -> leftScreenIds = leftScreenIds + type.id
-                    ScreenSide.Right -> rightScreenIds = rightScreenIds + type.id
-                }
-                persistLayout()
-                isScreenEditorOpen = false
-            }
-        )
+        ScreenEditorSheet(ScreenSide.fromName(pendingScreenSide), { isScreenEditorOpen = false }) { side, type ->
+            when (side) { ScreenSide.Left -> leftScreenIds = leftScreenIds + type.id; ScreenSide.Right -> rightScreenIds = rightScreenIds + type.id }
+            persistLayout()
+            isScreenEditorOpen = false
+        }
     }
 
     if (isWidgetPickerOpen) {
-        WidgetPickerSheet(
-            widgets = availableWidgets,
-            onSelectWidget = { providerInfo ->
-                handleWidgetSelected(providerInfo)
-            },
-            onDismissRequest = { isWidgetPickerOpen = false }
-        )
+        WidgetPickerSheet(availableWidgets, { handleWidgetSelected(it) }) { isWidgetPickerOpen = false }
     }
 }
+
+// ── Anchor Home Screen ──
 
 @Composable
 private fun AnchorHomeScreen(
     workspaceSlots: List<SlotContent?>,
     appsByKey: Map<String, LauncherApp>,
+    iconsByKey: Map<String, ResolvedIcon>,
+    notificationCounts: Map<String, Int>,
     widgetHostController: LauncherWidgetHostController,
     isEditMode: Boolean,
     selectedSlot: SlotSelection?,
@@ -772,847 +508,348 @@ private fun AnchorHomeScreen(
     onWorkspaceDragCancel: () -> Unit
 ) {
     var cumulativeDrag by remember { mutableStateOf(0f) }
-    val now by produceState(initialValue = LocalDateTime.now()) {
-        while (true) {
-            value = LocalDateTime.now()
-            delay(30_000)
-        }
-    }
+    val now by produceState(initialValue = LocalDateTime.now()) { while (true) { value = LocalDateTime.now(); delay(30_000) } }
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .pointerInput(Unit) {
-                detectVerticalDragGestures(
-                    onVerticalDrag = { _, dragAmount ->
-                        cumulativeDrag += dragAmount
-                    },
-                    onDragEnd = {
-                        if (cumulativeDrag < SWIPE_UP_THRESHOLD) {
-                            onOpenDrawer()
-                        }
-                        cumulativeDrag = 0f
-                    },
-                    onDragCancel = {
-                        cumulativeDrag = 0f
-                    }
-                )
-            }
-            .padding(horizontal = 24.dp, vertical = 20.dp),
+        modifier = Modifier.fillMaxSize().pointerInput(Unit) {
+            detectVerticalDragGestures(
+                onVerticalDrag = { _, dragAmount -> cumulativeDrag += dragAmount },
+                onDragEnd = { if (cumulativeDrag < SWIPE_UP_THRESHOLD) onOpenDrawer(); cumulativeDrag = 0f },
+                onDragCancel = { cumulativeDrag = 0f }
+            )
+        }.padding(horizontal = 24.dp, vertical = 20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        Text(text = now.format(timeFormatter), style = MaterialTheme.typography.displayLarge)
+        Text(text = now.format(dateFormatter), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(
-            text = now.format(timeFormatter),
-            style = MaterialTheme.typography.displayLarge
+            text = if (isEditMode) "Edit mode: tap an icon, then tap another slot to swap." else "Swipe up for app drawer. Long-press an empty slot to edit.",
+            style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Text(
-            text = now.format(dateFormatter),
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            text = if (isEditMode) {
-                "Edit mode: tap an icon, then tap another slot to swap."
-            } else {
-                "Swipe up for app drawer. Long-press an empty slot to edit."
-            },
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
         FilledTonalButton(onClick = onOpenDrawer) {
-            Icon(
-                imageVector = Icons.Rounded.KeyboardArrowUp,
-                contentDescription = null
-            )
+            Icon(imageVector = Icons.Rounded.KeyboardArrowUp, contentDescription = null)
             Spacer(modifier = Modifier.size(8.dp))
-            Text(
-                text = if (isEditMode) {
-                    "Open Drawer (assign app)"
-                } else {
-                    "Open App Drawer"
-                }
-            )
+            Text(text = if (isEditMode) "Open Drawer (assign app)" else "Open App Drawer")
         }
-
         WorkspaceCard(
-            workspaceSlots = workspaceSlots,
-            appsByKey = appsByKey,
-            widgetHostController = widgetHostController,
-            isEditMode = isEditMode,
-            selectedSlot = selectedSlot,
-            dragHoverTarget = dragHoverTarget,
-            dragSource = dragSource,
-            onWorkspaceSlotTapped = onWorkspaceSlotTapped,
-            onLongPressEmptySlot = onEnterEditMode,
-            onWorkspaceSlotBoundsChanged = onWorkspaceSlotBoundsChanged,
-            onWorkspaceDragStart = onWorkspaceDragStart,
-            onWorkspaceDragMove = onWorkspaceDragMove,
-            onWorkspaceDragEnd = onWorkspaceDragEnd,
-            onWorkspaceDragCancel = onWorkspaceDragCancel
+            workspaceSlots, appsByKey, iconsByKey, notificationCounts, widgetHostController,
+            isEditMode, selectedSlot, dragHoverTarget, dragSource,
+            onWorkspaceSlotTapped, onEnterEditMode, onWorkspaceSlotBoundsChanged,
+            onWorkspaceDragStart, onWorkspaceDragMove, onWorkspaceDragEnd, onWorkspaceDragCancel
         )
     }
 }
+
+// ── Workspace Card ──
 
 @Composable
 private fun WorkspaceCard(
     workspaceSlots: List<SlotContent?>,
     appsByKey: Map<String, LauncherApp>,
+    iconsByKey: Map<String, ResolvedIcon>,
+    notificationCounts: Map<String, Int>,
     widgetHostController: LauncherWidgetHostController,
-    isEditMode: Boolean,
-    selectedSlot: SlotSelection?,
-    dragHoverTarget: SlotSelection?,
-    dragSource: SlotSelection?,
-    onWorkspaceSlotTapped: (Int) -> Unit,
-    onLongPressEmptySlot: () -> Unit,
+    isEditMode: Boolean, selectedSlot: SlotSelection?, dragHoverTarget: SlotSelection?, dragSource: SlotSelection?,
+    onWorkspaceSlotTapped: (Int) -> Unit, onLongPressEmptySlot: () -> Unit,
     onWorkspaceSlotBoundsChanged: (Int, Rect) -> Unit,
-    onWorkspaceDragStart: (Int, Offset) -> Unit,
-    onWorkspaceDragMove: (Offset) -> Unit,
-    onWorkspaceDragEnd: () -> Unit,
-    onWorkspaceDragCancel: () -> Unit
+    onWorkspaceDragStart: (Int, Offset) -> Unit, onWorkspaceDragMove: (Offset) -> Unit,
+    onWorkspaceDragEnd: () -> Unit, onWorkspaceDragCancel: () -> Unit
 ) {
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(36.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "Home Workspace \u00b7 4 \u00d7 5",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
+    ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.cardCornerRadius)) {
+        Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(text = "Home Workspace \u00b7 4 \u00d7 5", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             LazyVerticalGrid(
                 columns = GridCells.Fixed(WORKSPACE_COLUMNS),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(300.dp),
+                modifier = Modifier.fillMaxWidth().height(300.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 userScrollEnabled = false
             ) {
                 items(WORKSPACE_SLOTS) { index ->
                     val content = workspaceSlots.getOrNull(index)
+                    val ak = if (content is SlotContent.App) content.key else null
                     WorkspaceSlot(
                         content = content,
-                        app = when (content) {
-                            is SlotContent.App -> appsByKey[content.key]
-                            else -> null
-                        },
+                        app = if (content is SlotContent.App) appsByKey[content.key] else null,
+                        icon = ak?.let { iconsByKey[it] },
+                        hasNotification = ak?.let { val pkg = it.substringBefore("/"); (notificationCounts[pkg] ?: 0) > 0 } ?: false,
                         widgetHostController = widgetHostController,
                         isEditMode = isEditMode,
-                        isSelected = selectedSlot == SlotSelection(
-                            area = SlotArea.Workspace,
-                            index = index
-                        ),
-                        isDropTarget = dragHoverTarget == SlotSelection(
-                            area = SlotArea.Workspace,
-                            index = index
-                        ),
-                        isDragSource = dragSource == SlotSelection(
-                            area = SlotArea.Workspace,
-                            index = index
-                        ),
+                        isSelected = selectedSlot == SlotSelection(SlotArea.Workspace, index),
+                        isDropTarget = dragHoverTarget == SlotSelection(SlotArea.Workspace, index),
+                        isDragSource = dragSource == SlotSelection(SlotArea.Workspace, index),
                         onTap = { onWorkspaceSlotTapped(index) },
-                        onLongPressEmpty = {
-                            if (content == null) {
-                                onLongPressEmptySlot()
-                            }
-                        },
-                        onBoundsChanged = { bounds ->
-                            onWorkspaceSlotBoundsChanged(index, bounds)
-                        },
-                        onDragStart = { pointerInRoot ->
-                            onWorkspaceDragStart(index, pointerInRoot)
-                        },
-                        onDragMove = onWorkspaceDragMove,
-                        onDragEnd = onWorkspaceDragEnd,
-                        onDragCancel = onWorkspaceDragCancel
+                        onLongPressEmpty = { if (content == null) onLongPressEmptySlot() },
+                        onBoundsChanged = { onWorkspaceSlotBoundsChanged(index, it) },
+                        onDragStart = { onWorkspaceDragStart(index, it) },
+                        onDragMove = onWorkspaceDragMove, onDragEnd = onWorkspaceDragEnd, onDragCancel = onWorkspaceDragCancel
                     )
                 }
             }
         }
     }
 }
+
+// ── Workspace Slot ──
 
 @Composable
 private fun WorkspaceSlot(
-    content: SlotContent?,
-    app: LauncherApp?,
+    content: SlotContent?, app: LauncherApp?, icon: ResolvedIcon?, hasNotification: Boolean,
     widgetHostController: LauncherWidgetHostController,
-    isEditMode: Boolean,
-    isSelected: Boolean,
-    isDropTarget: Boolean,
-    isDragSource: Boolean,
-    onTap: () -> Unit,
-    onLongPressEmpty: () -> Unit,
-    onBoundsChanged: (Rect) -> Unit,
-    onDragStart: (Offset) -> Unit,
-    onDragMove: (Offset) -> Unit,
-    onDragEnd: () -> Unit,
-    onDragCancel: () -> Unit
+    isEditMode: Boolean, isSelected: Boolean, isDropTarget: Boolean, isDragSource: Boolean,
+    onTap: () -> Unit, onLongPressEmpty: () -> Unit, onBoundsChanged: (Rect) -> Unit,
+    onDragStart: (Offset) -> Unit, onDragMove: (Offset) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit
 ) {
     var slotBounds by remember { mutableStateOf<Rect?>(null) }
+    val motionTokens = LocalMotionTokens.current
+    val shapeTokens = LocalShapeTokens.current
+    val scale by animateFloatAsState(
+        targetValue = when { isDragSource -> 0.85f; isDropTarget -> 1.08f; isSelected -> 1.05f; else -> 1f },
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = motionTokens.springStiffness),
+        label = "slot-scale"
+    )
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Surface(
-            modifier = Modifier
-                .size(52.dp)
-                .onGloballyPositioned { coordinates ->
-                    val bounds = coordinates.boundsInRoot()
-                    slotBounds = bounds
-                    onBoundsChanged(bounds)
-                }
-                .pointerInput(content, isEditMode) {
-                    detectTapGestures(
-                        onTap = { onTap() },
-                        onLongPress = {
-                            if (content == null) {
-                                onLongPressEmpty()
-                            }
-                        }
-                    )
-                }
-                .pointerInput(content, isEditMode) {
-                    if (!isEditMode || content == null) {
-                        return@pointerInput
-                    }
-
-                    var currentPointerInRoot = Offset.Zero
-                    detectDragGesturesAfterLongPress(
-                        onDragStart = { localOffset ->
-                            val origin = slotBounds?.topLeft ?: Offset.Zero
-                            currentPointerInRoot = origin + localOffset
-                            onDragStart(currentPointerInRoot)
-                        },
-                        onDrag = { change, dragAmount ->
-                            change.consume()
-                            currentPointerInRoot += dragAmount
-                            onDragMove(currentPointerInRoot)
-                        },
-                        onDragEnd = {
-                            onDragEnd()
-                        },
-                        onDragCancel = {
-                            onDragCancel()
-                        }
-                    )
-                },
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
-            color = when {
-                isDragSource -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
-                isDropTarget -> MaterialTheme.colorScheme.tertiaryContainer
-                isSelected -> MaterialTheme.colorScheme.tertiaryContainer
-                content == null -> MaterialTheme.colorScheme.surfaceVariant
-                content is SlotContent.Widget -> MaterialTheme.colorScheme.primaryContainer
-                else -> MaterialTheme.colorScheme.secondaryContainer
-            }
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                when (content) {
-                    null -> {
-                        Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Box {
+            Surface(
+                modifier = Modifier.size(52.dp).graphicsLayer { scaleX = scale; scaleY = scale }
+                    .onGloballyPositioned { slotBounds = it.boundsInRoot(); onBoundsChanged(it.boundsInRoot()) }
+                    .pointerInput(content, isEditMode) { detectTapGestures(onTap = { onTap() }, onLongPress = { if (content == null) onLongPressEmpty() }) }
+                    .pointerInput(content, isEditMode) {
+                        if (!isEditMode || content == null) return@pointerInput
+                        var currentPointer = Offset.Zero
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { localOffset -> currentPointer = (slotBounds?.topLeft ?: Offset.Zero) + localOffset; onDragStart(currentPointer) },
+                            onDrag = { change, dragAmount -> change.consume(); currentPointer += dragAmount; onDragMove(currentPointer) },
+                            onDragEnd = { onDragEnd() }, onDragCancel = { onDragCancel() }
                         )
-                    }
-
-                    is SlotContent.App -> {
-                        if (app != null) {
-                            Text(
-                                text = app.label.firstOrNull()?.uppercaseChar()
-                                    ?.toString() ?: "?",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        } else {
-                            Text(
-                                text = "?",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                    },
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(shapeTokens.iconCornerRadius),
+                color = when {
+                    isDragSource -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                    isDropTarget -> MaterialTheme.colorScheme.tertiaryContainer
+                    isSelected -> MaterialTheme.colorScheme.tertiaryContainer
+                    content == null -> MaterialTheme.colorScheme.surfaceVariant
+                    content is SlotContent.Widget -> MaterialTheme.colorScheme.primaryContainer
+                    else -> MaterialTheme.colorScheme.secondaryContainer
+                }
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    when (content) {
+                        null -> Icon(imageVector = Icons.Rounded.Add, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        is SlotContent.App -> {
+                            if (icon != null) Image(bitmap = icon.imageBitmap, contentDescription = app?.label, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+                            else Text(text = (app?.label?.firstOrNull()?.uppercaseChar()?.toString() ?: "?"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         }
-                    }
-
-                    is SlotContent.Widget -> {
-                        val providerInfo = remember(content.appWidgetId) {
-                            widgetHostController.getWidgetInfo(content.appWidgetId)
-                        }
-                        if (providerInfo != null) {
-                            AndroidView(
-                                factory = { ctx ->
+                        is SlotContent.Widget -> {
+                            val providerInfo = remember(content.appWidgetId) { widgetHostController.getWidgetInfo(content.appWidgetId) }
+                            if (providerInfo != null) {
+                                AndroidView(factory = { ctx ->
                                     FrameLayout(ctx).apply {
-                                        layoutParams = FrameLayout.LayoutParams(
-                                            FrameLayout.LayoutParams.MATCH_PARENT,
-                                            FrameLayout.LayoutParams.MATCH_PARENT
-                                        )
-                                        addView(
-                                            widgetHostController.createHostView(
-                                                content.appWidgetId,
-                                                providerInfo
-                                            ).apply {
-                                                layoutParams = FrameLayout.LayoutParams(
-                                                    FrameLayout.LayoutParams.MATCH_PARENT,
-                                                    FrameLayout.LayoutParams.MATCH_PARENT
-                                                )
-                                            }
-                                        )
+                                        layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+                                        addView(widgetHostController.createHostView(content.appWidgetId, providerInfo).apply { layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT) })
                                     }
-                                },
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            Text(
-                                text = "W",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                                }, modifier = Modifier.fillMaxSize())
+                            } else Text("W", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
             }
+            if (hasNotification && !isEditMode) NotificationDot(modifier = Modifier.align(Alignment.TopEnd))
         }
-
         Text(
-            text = when {
-                content is SlotContent.App && app != null -> app.label
-                content is SlotContent.Widget -> "Widget"
-                isEditMode -> "Empty"
-                else -> ""
-            },
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.labelSmall,
-            textAlign = TextAlign.Center
+            text = when { content is SlotContent.App && app != null -> app.label; content is SlotContent.Widget -> "Widget"; isEditMode -> "Empty"; else -> "" },
+            maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center
         )
     }
 }
+
+// ── Edit Mode Overlay ──
 
 @Composable
 private fun EditModeOverlay(
-    leftCount: Int,
-    rightCount: Int,
-    onAddLeft: () -> Unit,
-    onAddRight: () -> Unit,
-    onWidgets: () -> Unit,
-    onDone: () -> Unit,
+    leftCount: Int, rightCount: Int,
+    onAddLeft: () -> Unit, onAddRight: () -> Unit, onWidgets: () -> Unit, onDone: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(
-        modifier = modifier,
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
-        tonalElevation = 8.dp,
-        shadowElevation = 8.dp,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f)
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text(
-                text = "Edit Mode",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                text = "Screens \u00b7 Left: $leftCount  |  Right: $rightCount",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                FilledTonalButton(onClick = onWidgets) {
-                    Icon(
-                        imageVector = Icons.Rounded.ViewAgenda,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.size(6.dp))
-                    Text("Widgets")
-                }
-                FilledTonalButton(onClick = onAddLeft) {
-                    Text("Add Left")
-                }
-                FilledTonalButton(onClick = onAddRight) {
-                    Text("Add Right")
-                }
-                OutlinedButton(onClick = onDone) {
-                    Text("Done")
-                }
+    Surface(modifier = modifier, shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.buttonCornerRadius), tonalElevation = 8.dp, shadowElevation = 8.dp, color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f)) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Edit Mode", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text("Screens \u00b7 Left: $leftCount  |  Right: $rightCount", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                FilledTonalButton(onClick = onWidgets) { Icon(Icons.Rounded.ViewAgenda, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.size(6.dp)); Text("Widgets") }
+                FilledTonalButton(onClick = onAddLeft) { Text("Add Left") }
+                FilledTonalButton(onClick = onAddRight) { Text("Add Right") }
+                OutlinedButton(onClick = onDone) { Text("Done") }
             }
         }
     }
 }
 
-@Composable
-private fun ExtensionScreenPage(
-    type: ExtensionScreenType,
-    direction: String,
-    index: Int,
-    onGoHome: () -> Unit
-) {
-    val icon = when (type) {
-        ExtensionScreenType.Gallery -> Icons.Rounded.PhotoLibrary
-        ExtensionScreenType.Files -> Icons.Rounded.Folder
-        ExtensionScreenType.Weather -> Icons.Rounded.WbSunny
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        ElevatedCard(
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(40.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(24.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                horizontalAlignment = Alignment.Start
-            ) {
-                Text(
-                    text = "$direction page $index",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "${type.title} Screen",
-                        style = MaterialTheme.typography.displayMedium
-                    )
-                }
-                Text(
-                    text = type.summary,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                FilledTonalButton(onClick = onGoHome) {
-                    Icon(
-                        imageVector = Icons.Rounded.Home,
-                        contentDescription = null
-                    )
-                    Spacer(modifier = Modifier.size(8.dp))
-                    Text("Return to Home")
-                }
-            }
-        }
-    }
-}
+// ── Unassigned Extension Page ──
 
 @Composable
 private fun UnassignedExtensionPage(
-    direction: String,
-    index: Int,
-    isEditMode: Boolean,
-    onAddScreen: () -> Unit,
-    onGoHome: () -> Unit
+    direction: String, index: Int, isEditMode: Boolean,
+    onAddScreen: () -> Unit, onGoHome: () -> Unit
 ) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        ElevatedCard(
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(40.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(24.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
+    Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+        ElevatedCard(shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.dialogCornerRadius)) {
+            Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("$direction page $index", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text("Unassigned App Screen", style = MaterialTheme.typography.displayMedium)
                 Text(
-                    text = "$direction page $index",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary
+                    text = if (isEditMode) "This page is ready. Add Gallery, Files, or Weather from the editor." else "Long-press an empty slot on Home to enter Edit Mode and assign this page.",
+                    style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Text(
-                    text = "Unassigned App Screen",
-                    style = MaterialTheme.typography.displayMedium
-                )
-                Text(
-                    text = if (isEditMode) {
-                        "This page is ready. Add Gallery, Files, or Weather from the editor."
-                    } else {
-                        "Long-press an empty slot on Home to enter Edit Mode and assign this page."
-                    },
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (isEditMode) {
-                    FilledTonalButton(onClick = onAddScreen) {
-                        Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = null
-                        )
-                        Spacer(modifier = Modifier.size(8.dp))
-                        Text("Assign Screen")
-                    }
-                }
-                OutlinedButton(onClick = onGoHome) {
-                    Icon(
-                        imageVector = Icons.Rounded.Home,
-                        contentDescription = null
-                    )
-                    Spacer(modifier = Modifier.size(8.dp))
-                    Text("Back Home")
-                }
+                if (isEditMode) FilledTonalButton(onClick = onAddScreen) { Icon(Icons.Rounded.Add, null); Spacer(Modifier.size(8.dp)); Text("Assign Screen") }
+                OutlinedButton(onClick = onGoHome) { Icon(Icons.Rounded.Home, null); Spacer(Modifier.size(8.dp)); Text("Back Home") }
             }
         }
     }
 }
+
+// ── Global Dock ──
 
 @Composable
 private fun GlobalDock(
-    slotContents: List<SlotContent?>,
-    appsByKey: Map<String, LauncherApp>,
+    slotContents: List<SlotContent?>, appsByKey: Map<String, LauncherApp>,
+    iconsByKey: Map<String, ResolvedIcon>, notificationCounts: Map<String, Int>,
     widgetHostController: LauncherWidgetHostController,
-    isEditMode: Boolean,
-    selectedSlot: SlotSelection?,
-    dragHoverTarget: SlotSelection?,
-    dragSource: SlotSelection?,
-    onDockSlotTapped: (Int) -> Unit,
-    onDockSlotBoundsChanged: (Int, Rect) -> Unit,
-    onDockDragStart: (Int, Offset) -> Unit,
-    onDockDragMove: (Offset) -> Unit,
-    onDockDragEnd: () -> Unit,
-    onDockDragCancel: () -> Unit,
-    onOpenDrawer: () -> Unit,
+    isEditMode: Boolean, selectedSlot: SlotSelection?, dragHoverTarget: SlotSelection?, dragSource: SlotSelection?,
+    onDockSlotTapped: (Int) -> Unit, onDockSlotBoundsChanged: (Int, Rect) -> Unit,
+    onDockDragStart: (Int, Offset) -> Unit, onDockDragMove: (Offset) -> Unit,
+    onDockDragEnd: () -> Unit, onDockDragCancel: () -> Unit, onOpenDrawer: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(
-        modifier = modifier,
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(100.dp),
-        tonalElevation = 8.dp,
-        shadowElevation = 10.dp,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.95f)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+    Surface(modifier = modifier, shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.dockCornerRadius), tonalElevation = 8.dp, shadowElevation = 10.dp, color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.95f)) {
+        Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             repeat(DOCK_APP_SLOTS) { index ->
                 val content = slotContents.getOrNull(index)
-                val app = when (content) {
-                    is SlotContent.App -> appsByKey[content.key]
-                    else -> null
-                }
+                val ak = if (content is SlotContent.App) content.key else null
                 DockSlot(
-                    content = content,
-                    app = app,
+                    content = content, app = if (content is SlotContent.App) appsByKey[content.key] else null,
+                    icon = ak?.let { iconsByKey[it] },
+                    hasNotification = ak?.let { val pkg = it.substringBefore("/"); (notificationCounts[pkg] ?: 0) > 0 } ?: false,
                     widgetHostController = widgetHostController,
                     isEditMode = isEditMode,
-                    isSelected = selectedSlot == SlotSelection(
-                        area = SlotArea.Dock,
-                        index = index
-                    ),
-                    isDropTarget = dragHoverTarget == SlotSelection(
-                        area = SlotArea.Dock,
-                        index = index
-                    ),
-                    isDragSource = dragSource == SlotSelection(
-                        area = SlotArea.Dock,
-                        index = index
-                    ),
+                    isSelected = selectedSlot == SlotSelection(SlotArea.Dock, index),
+                    isDropTarget = dragHoverTarget == SlotSelection(SlotArea.Dock, index),
+                    isDragSource = dragSource == SlotSelection(SlotArea.Dock, index),
                     onTap = { onDockSlotTapped(index) },
-                    onBoundsChanged = { bounds ->
-                        onDockSlotBoundsChanged(index, bounds)
-                    },
-                    onDragStart = { pointerInRoot ->
-                        onDockDragStart(index, pointerInRoot)
-                    },
-                    onDragMove = onDockDragMove,
-                    onDragEnd = onDockDragEnd,
-                    onDragCancel = onDockDragCancel
+                    onBoundsChanged = { onDockSlotBoundsChanged(index, it) },
+                    onDragStart = { onDockDragStart(index, it) },
+                    onDragMove = onDockDragMove, onDragEnd = onDockDragEnd, onDragCancel = onDockDragCancel
                 )
             }
-
-            IconButton(onClick = onOpenDrawer) {
-                Icon(
-                    imageVector = Icons.Rounded.Apps,
-                    contentDescription = "Open app drawer"
-                )
-            }
+            IconButton(onClick = onOpenDrawer) { Icon(Icons.Rounded.Apps, "Open app drawer") }
         }
     }
 }
+
+// ── Dock Slot ──
 
 @Composable
 private fun DockSlot(
-    content: SlotContent?,
-    app: LauncherApp?,
+    content: SlotContent?, app: LauncherApp?, icon: ResolvedIcon?, hasNotification: Boolean,
     widgetHostController: LauncherWidgetHostController,
-    isEditMode: Boolean,
-    isSelected: Boolean,
-    isDropTarget: Boolean,
-    isDragSource: Boolean,
-    onTap: () -> Unit,
-    onBoundsChanged: (Rect) -> Unit,
-    onDragStart: (Offset) -> Unit,
-    onDragMove: (Offset) -> Unit,
-    onDragEnd: () -> Unit,
-    onDragCancel: () -> Unit
+    isEditMode: Boolean, isSelected: Boolean, isDropTarget: Boolean, isDragSource: Boolean,
+    onTap: () -> Unit, onBoundsChanged: (Rect) -> Unit,
+    onDragStart: (Offset) -> Unit, onDragMove: (Offset) -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit
 ) {
     var slotBounds by remember { mutableStateOf<Rect?>(null) }
+    val motionTokens = LocalMotionTokens.current
+    val scale by animateFloatAsState(
+        targetValue = when { isDragSource -> 0.8f; isDropTarget -> 1.12f; isSelected -> 1.06f; else -> 1f },
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = motionTokens.springStiffness),
+        label = "dock-slot-scale"
+    )
 
-    Column(
-        modifier = Modifier.widthIn(min = 48.dp, max = 64.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Surface(
-            modifier = Modifier
-                .size(40.dp)
-                .onGloballyPositioned { coordinates ->
-                    val bounds = coordinates.boundsInRoot()
-                    slotBounds = bounds
-                    onBoundsChanged(bounds)
-                }
-                .pointerInput(content, isEditMode) {
-                    detectTapGestures(onTap = { onTap() })
-                }
-                .pointerInput(content, isEditMode) {
-                    if (!isEditMode || content == null) {
-                        return@pointerInput
-                    }
-
-                    var currentPointerInRoot = Offset.Zero
-                    detectDragGesturesAfterLongPress(
-                        onDragStart = { localOffset ->
-                            val origin = slotBounds?.topLeft ?: Offset.Zero
-                            currentPointerInRoot = origin + localOffset
-                            onDragStart(currentPointerInRoot)
-                        },
-                        onDrag = { change, dragAmount ->
-                            change.consume()
-                            currentPointerInRoot += dragAmount
-                            onDragMove(currentPointerInRoot)
-                        },
-                        onDragEnd = {
-                            onDragEnd()
-                        },
-                        onDragCancel = {
-                            onDragCancel()
-                        }
-                    )
-                },
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
-            color = when {
-                isDragSource -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
-                isDropTarget -> MaterialTheme.colorScheme.tertiaryContainer
-                isSelected -> MaterialTheme.colorScheme.tertiaryContainer
-                content == null -> MaterialTheme.colorScheme.surfaceVariant
-                content is SlotContent.Widget -> MaterialTheme.colorScheme.primaryContainer
-                else -> MaterialTheme.colorScheme.primaryContainer
-            }
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                when (content) {
-                    null -> {
-                        Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(modifier = Modifier.widthIn(min = 48.dp, max = 64.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Box {
+            Surface(
+                modifier = Modifier.size(40.dp).graphicsLayer { scaleX = scale; scaleY = scale }
+                    .onGloballyPositioned { slotBounds = it.boundsInRoot(); onBoundsChanged(it.boundsInRoot()) }
+                    .pointerInput(content, isEditMode) { detectTapGestures(onTap = { onTap() }) }
+                    .pointerInput(content, isEditMode) {
+                        if (!isEditMode || content == null) return@pointerInput
+                        var currentPointer = Offset.Zero
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { localOffset -> currentPointer = (slotBounds?.topLeft ?: Offset.Zero) + localOffset; onDragStart(currentPointer) },
+                            onDrag = { change, dragAmount -> change.consume(); currentPointer += dragAmount; onDragMove(currentPointer) },
+                            onDragEnd = { onDragEnd() }, onDragCancel = { onDragCancel() }
                         )
-                    }
-
-                    is SlotContent.App -> {
-                        if (app != null) {
-                            Text(
-                                text = app.label.firstOrNull()?.uppercaseChar()
-                                    ?.toString() ?: "?",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        } else {
-                            Text(
-                                text = "?",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                    },
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                color = when {
+                    isDragSource -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                    isDropTarget -> MaterialTheme.colorScheme.tertiaryContainer
+                    isSelected -> MaterialTheme.colorScheme.tertiaryContainer
+                    content == null -> MaterialTheme.colorScheme.surfaceVariant
+                    content is SlotContent.Widget -> MaterialTheme.colorScheme.primaryContainer
+                    else -> MaterialTheme.colorScheme.primaryContainer
+                }
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    when (content) {
+                        null -> Icon(Icons.Rounded.Add, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        is SlotContent.App -> {
+                            if (icon != null) Image(bitmap = icon.imageBitmap, contentDescription = app?.label, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+                            else Text(text = (app?.label?.firstOrNull()?.uppercaseChar()?.toString() ?: "?"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         }
-                    }
-
-                    is SlotContent.Widget -> {
-                        Text(
-                            text = "W",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        is SlotContent.Widget -> Text("W", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
+            if (hasNotification && !isEditMode) NotificationDot(modifier = Modifier.align(Alignment.TopEnd))
         }
-
         Text(
-            text = when {
-                content is SlotContent.App && app != null -> app.label
-                content is SlotContent.Widget -> "Widget"
-                isEditMode -> "Empty"
-                else -> ""
-            },
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center
+            text = when { content is SlotContent.App && app != null -> app.label; content is SlotContent.Widget -> "Widget"; isEditMode -> "Empty"; else -> "" },
+            style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center
         )
     }
 }
 
+// ── Dragged App Preview ──
+
 @Composable
-private fun DraggedAppPreview(
-    label: String,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        modifier = modifier.size(52.dp),
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
-        tonalElevation = 12.dp,
-        shadowElevation = 12.dp,
-        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.94f)
-    ) {
+private fun DraggedAppPreview(label: String, modifier: Modifier = Modifier) {
+    Surface(modifier = modifier.size(52.dp), shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.iconCornerRadius), tonalElevation = 12.dp, shadowElevation = 12.dp, color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.94f)) {
         Box(contentAlignment = Alignment.Center) {
-            Text(
-                text = label.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
+            Text(text = label.firstOrNull()?.uppercaseChar()?.toString() ?: "?", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         }
     }
 }
+
+// ── App Drawer Sheet ──
 
 @Composable
 private fun AppDrawerSheet(
-    isLoading: Boolean,
-    apps: List<LauncherApp>,
-    searchQuery: String,
-    onSearchQueryChanged: (String) -> Unit,
-    onAppClicked: (LauncherApp) -> Unit
+    isLoading: Boolean, apps: List<LauncherApp>, icons: Map<String, ResolvedIcon>,
+    notificationCounts: Map<String, Int>, searchQuery: String,
+    onSearchQueryChanged: (String) -> Unit, onAppClicked: (LauncherApp) -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .imePadding()
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Text(
-            text = "App Drawer",
-            style = MaterialTheme.typography.displayMedium
-        )
-
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = onSearchQueryChanged,
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            leadingIcon = {
-                Icon(
-                    imageVector = Icons.Rounded.Search,
-                    contentDescription = null
-                )
-            },
-            placeholder = {
-                Text("Search by name or package")
-            }
-        )
-
+    Column(modifier = Modifier.fillMaxWidth().imePadding().padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("App Drawer", style = MaterialTheme.typography.displayMedium)
+        OutlinedTextField(value = searchQuery, onValueChange = onSearchQueryChanged, modifier = Modifier.fillMaxWidth(), singleLine = true, leadingIcon = { Icon(Icons.Rounded.Search, null) }, placeholder = { Text("Search by name or package") })
         when {
-            isLoading -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 24.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
-                }
-            }
-
-            apps.isEmpty() -> {
-                Text(
-                    text = "No apps matched your search.",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            else -> {
-                LazyColumn(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(
-                        items = apps,
-                        key = { app -> appKey(app) }
-                    ) { app ->
-                        Surface(
-                            onClick = { onAppClicked(app) },
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(
-                                20.dp
-                            ),
-                            tonalElevation = 2.dp,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Surface(
-                                    modifier = Modifier.size(36.dp),
-                                    shape = androidx.compose.foundation.shape.RoundedCornerShape(
-                                        12.dp
-                                    ),
-                                    color = MaterialTheme.colorScheme.secondaryContainer
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Text(
-                                            text = app.label.firstOrNull()
-                                                ?.uppercaseChar()?.toString() ?: "?",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    }
+            isLoading -> Box(modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            apps.isEmpty() -> Text("No apps matched your search.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else -> LazyColumn(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(items = apps, key = { a -> appKey(a) }) { app ->
+                    Surface(onClick = { onAppClicked(app) }, shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.listItemCornerRadius), tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
+                        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Surface(modifier = Modifier.size(36.dp), shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    val drawerIcon = icons[appKey(app)]
+                                    if (drawerIcon != null) Image(bitmap = drawerIcon.imageBitmap, contentDescription = app.label, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+                                    else Text(text = app.label.firstOrNull()?.uppercaseChar()?.toString() ?: "?", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                                    if ((notificationCounts[app.packageName] ?: 0) > 0) NotificationDot(modifier = Modifier.align(Alignment.TopEnd))
                                 }
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                                ) {
-                                    Text(
-                                        text = app.label,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = app.packageName,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
+                            }
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(text = app.label, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(text = app.packageName, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -1621,146 +858,56 @@ private fun AppDrawerSheet(
         }
     }
 }
+
+// ── Screen Editor Sheet ──
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ScreenEditorSheet(
-    initialSide: ScreenSide,
-    onDismissRequest: () -> Unit,
+    initialSide: ScreenSide, onDismissRequest: () -> Unit,
     onConfirm: (ScreenSide, ExtensionScreenType) -> Unit
 ) {
     var selectedSide by remember(initialSide) { mutableStateOf(initialSide) }
     var selectedType by remember { mutableStateOf(ExtensionScreenType.Gallery) }
-
-    ModalBottomSheet(
-        onDismissRequest = onDismissRequest
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .imePadding()
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "Assign App Screen",
-                style = MaterialTheme.typography.displayMedium
-            )
-            Text(
-                text = "Choose the side and which environment screen to append.",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (selectedSide == ScreenSide.Left) {
-                    FilledTonalButton(onClick = { selectedSide = ScreenSide.Left }) {
-                        Text("Left")
-                    }
-                } else {
-                    OutlinedButton(onClick = { selectedSide = ScreenSide.Left }) {
-                        Text("Left")
-                    }
-                }
-
-                if (selectedSide == ScreenSide.Right) {
-                    FilledTonalButton(onClick = { selectedSide = ScreenSide.Right }) {
-                        Text("Right")
-                    }
-                } else {
-                    OutlinedButton(onClick = { selectedSide = ScreenSide.Right }) {
-                        Text("Right")
-                    }
-                }
+    ModalBottomSheet(onDismissRequest = onDismissRequest) {
+        Column(modifier = Modifier.fillMaxWidth().imePadding().padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Assign App Screen", style = MaterialTheme.typography.displayMedium)
+            Text("Choose the side and which environment screen to append.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (selectedSide == ScreenSide.Left) FilledTonalButton(onClick = { selectedSide = ScreenSide.Left }) { Text("Left") } else OutlinedButton(onClick = { selectedSide = ScreenSide.Left }) { Text("Left") }
+                if (selectedSide == ScreenSide.Right) FilledTonalButton(onClick = { selectedSide = ScreenSide.Right }) { Text("Right") } else OutlinedButton(onClick = { selectedSide = ScreenSide.Right }) { Text("Right") }
             }
-
             ExtensionScreenType.entries.forEach { type ->
                 val isSelected = selectedType == type
-                val icon = when (type) {
-                    ExtensionScreenType.Gallery -> Icons.Rounded.PhotoLibrary
-                    ExtensionScreenType.Files -> Icons.Rounded.Folder
-                    ExtensionScreenType.Weather -> Icons.Rounded.WbSunny
-                }
-                Surface(
-                    onClick = { selectedType = type },
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
-                    color = if (isSelected) {
-                        MaterialTheme.colorScheme.secondaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    },
-                    tonalElevation = if (isSelected) 4.dp else 0.dp,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Surface(
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
-                            color = if (isSelected) {
-                                MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.15f)
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f)
-                            },
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = icon,
-                                    contentDescription = null,
-                                    tint = if (isSelected) {
-                                        MaterialTheme.colorScheme.onSecondaryContainer
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
+                val icon = when (type) { ExtensionScreenType.Gallery -> Icons.Rounded.PhotoLibrary; ExtensionScreenType.Files -> Icons.Rounded.Folder; ExtensionScreenType.Weather -> Icons.Rounded.WbSunny }
+                Surface(onClick = { selectedType = type }, shape = androidx.compose.foundation.shape.RoundedCornerShape(LocalShapeTokens.current.chipCornerRadius), color = if (isSelected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant, tonalElevation = if (isSelected) 4.dp else 0.dp, modifier = Modifier.fillMaxWidth()) {
+                    Row(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp), color = if (isSelected) MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.15f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f), modifier = Modifier.size(40.dp)) {
+                            Box(contentAlignment = Alignment.Center) { Icon(icon, null, tint = if (isSelected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp)) }
                         }
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            Text(
-                                text = type.title,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = type.summary,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(type.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text(type.summary, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        if (isSelected) {
-                            Icon(
-                                imageVector = Icons.Rounded.Check,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
+                        if (isSelected) Icon(Icons.Rounded.Check, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                     }
                 }
             }
-
-            FilledTonalButton(
-                onClick = { onConfirm(selectedSide, selectedType) },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Add ${selectedType.title} Screen")
-            }
+            FilledTonalButton(onClick = { onConfirm(selectedSide, selectedType) }, modifier = Modifier.fillMaxWidth()) { Text("Add ${selectedType.title} Screen") }
         }
     }
 }
 
-private fun appKey(app: LauncherApp): String =
-    "${app.packageName}/${app.activityName}"
+// ── Notification Dot ──
+
+@Composable
+private fun NotificationDot(modifier: Modifier = Modifier) {
+    Surface(modifier = modifier.size(10.dp).offset(x = 2.dp, y = (-2).dp), shape = androidx.compose.foundation.shape.CircleShape, color = MaterialTheme.colorScheme.error) {}
+}
+
+// ── Utilities ──
+
+private fun appKey(app: LauncherApp): String = "${app.packageName}/${app.activityName}"
 
 private fun launchApp(context: Context, app: LauncherApp) {
     val launchIntent = Intent(Intent.ACTION_MAIN).apply {
@@ -1768,14 +915,5 @@ private fun launchApp(context: Context, app: LauncherApp) {
         addCategory(Intent.CATEGORY_LAUNCHER)
         flags = Intent.FLAG_ACTIVITY_NEW_TASK
     }
-
-    runCatching {
-        context.startActivity(launchIntent)
-    }.onFailure {
-        Toast.makeText(
-            context,
-            "Unable to open ${app.label}",
-            Toast.LENGTH_SHORT
-        ).show()
-    }
+    runCatching { context.startActivity(launchIntent) }.onFailure { Toast.makeText(context, "Unable to open ${app.label}", Toast.LENGTH_SHORT).show() }
 }
